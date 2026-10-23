@@ -1,0 +1,289 @@
+:pp: {plus}{plus}
+
+= 重建交换链
+
+== 引言
+
+现在的应用已经能成功画出一个三角形，但还有一些情况它尚未正确处理。
+窗口表面可能发生变化，使交换链与它不再兼容。
+造成这种情况的原因之一，就是窗口尺寸改变。
+我们必须捕获这些事件，并重建交换链。
+
+== 重建交换链
+
+新建一个 `recreateSwapChain` 函数，让它调用 `createSwapChain`，以及所有为依赖交换链或窗口尺寸的对象准备的创建函数。
+
+[,c++]
+----
+void recreateSwapChain()
+{
+    device.waitIdle();
+
+    createSwapChain();
+    createImageViews();
+}
+----
+
+这里先调用 `vk::raii::Device::waitIdle`，因为和上一章一样，我们不应该去碰可能仍在使用中的资源。
+显然，交换链本身必须重建。
+图像视图也要重建，因为它们直接基于交换链图像。
+
+为确保这些对象的旧版本在重建之前被清理干净，我们应该把一部分清理代码挪到一个单独的函数里，好让 `recreateSwapChain` 能调用它。
+这个函数就叫 `cleanupSwapChain`：
+
+[,c++]
+----
+void cleanupSwapChain()
+{
+}
+
+void recreateSwapChain()
+{
+    device.waitIdle();
+
+    cleanupSwapChain();
+
+    createSwapChain();
+    createImageViews();
+}
+----
+
+下面把那些会随交换链刷新而重建的对象的清理代码，从 `cleanup` 挪到 `cleanupSwapChain`：
+
+[,c++]
+----
+void cleanupSwapChain()
+{
+    swapChainImageViews.clear();
+    swapChain = nullptr;
+}
+
+void cleanup()
+{
+    cleanupSwapChain();
+
+    glfwDestroyWindow(window);
+    glfwTerminate();
+}
+----
+
+注意，`chooseSwapExtent` 里已经查询了新的窗口分辨率，以保证交换链图像具有（新的）正确尺寸，所以无需改动 `chooseSwapExtent`（回忆一下，创建交换链时我们就得用 `glfwGetFramebufferSize` 以像素为单位取得窗口表面的分辨率）。
+
+重建交换链要做的就这些！
+不过这种做法有个缺点：创建新交换链之前，必须停下所有渲染。
+其实也可以在旧交换链图像的绘制命令仍在执行时创建新交换链。
+你需要把旧交换链传给 `vk::SwapchainCreateInfoKHR` 结构体的 `oldSwapchain` 字段，并在用完旧交换链后立刻销毁它。
+
+== 次优或过期的交换链
+
+现在只需判断什么时候需要重建交换链，然后调用新的 `recreateSwapChain` 函数。
+好在呈现期间 Vulkan 通常会直接告诉我们交换链已不再合用。
+`vk::raii::SwapchainKHR::acquireNextImage` 和 `vk::raii::Queue::presentKHR` 函数会返回下面这些特殊值来表示这种情况。
+
+* `vk::Result::eErrorOutOfDateKHR`：交换链已与窗口表面不兼容，不能再用于渲染。
+通常发生在窗口尺寸改变之后。
+注意，“vk::Result::eErrorOutOfDateKHR”其实是一个错误码，默认会触发异常。只要定义“VULKAN_HPP_HANDLE_ERROR_OUT_OF_DATE_AS_SUCCESS”，它就会被当作成功码处理，因此可以由“vk::raii::SwapchainKHR::acquireNextImage”和“vk::raii::Queue::presentKHR”返回。
+* `vk::Result::eSuboptimalKHR`：交换链仍能成功向窗口表面呈现，但已不能完全匹配窗口表面的属性。
+
+[,c++]
+----
+auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphores[frameIndex], nullptr);
+
+if (result == vk::Result::eErrorOutOfDateKHR)
+{
+  recreateSwapChain();
+  return;
+}
+if (result != vk::Result::eSuccess && result != vk::Result::eSuboptimalKHR)
+{
+  assert(result == vk::Result::eTimeout || result == vk::Result::eNotReady);
+  throw std::runtime_error("failed to acquire swap chain image!");
+}
+----
+
+如果尝试获取图像时发现交换链已过期，那就无法再向它呈现了。
+因此应当立即重建交换链，并在下一次 `drawFrame` 调用中重试。
+
+你也可以决定在交换链处于次优状态时同样重建，但这里我选择继续执行，因为图像已经获取到了。
+`vk::Result::eSuccess` 和 `vk::Result::eSuboptimalKHR` 都算作“成功”返回码。
+
+`vk::raii::Queue::presentKHR` 函数返回同样的值，含义也相同。
+在这种情况下，只要交换链处于次优状态我们也会重建它，因为我们要的是尽可能好的结果。
+
+[,c++]
+----
+const vk::PresentInfoKHR presentInfoKHR{.waitSemaphoreCount = 1,
+                                        .pWaitSemaphores    = &*renderFinishedSemaphores[imageIndex],
+                                        .swapchainCount     = 1,
+                                        .pSwapchains        = &*swapChain,
+                                        .pImageIndices      = &imageIndex};
+result = queue.presentKHR(presentInfoKHR);
+if ((result == vk::Result::eSuboptimalKHR) || (result == vk::Result::eErrorOutOfDateKHR))
+{
+  recreateSwapChain();
+}
+else
+{
+  // 除了 eSuccess 之外没有别的成功码；遇到任何错误码时，presentKHR 已经抛出异常。
+  assert(result == vk::Result::eSuccess);
+}
+----
+
+== 修复死锁
+
+回忆 xref:03_Drawing_a_triangle/03_Drawing/03_Frames_in_flight.adoc[上一章] 的内容：`drawFrame` 开头会等待当前帧的栅栏，然后立即把它重置：
+
+[,c++]
+----
+auto fenceResult = device.waitForFences(*inFlightFences[frameIndex], vk::True, UINT64_MAX);
+if (fenceResult != vk::Result::eSuccess)
+{
+  throw std::runtime_error("failed to wait for fence!");
+}
+
+device.resetFences(*inFlightFences[frameIndex]);
+----
+
+如果保留这套结构，又让 `drawFrame` 能在上面获取图像的步骤里提前返回，那么运行代码时就可能遭遇死锁。
+调试时我们会发现，应用在之后的某一帧走到 `vk::raii::Device::waitForFences` 后就再也过不去了。
+原因是：当 `vk::raii::SwapchainKHR::acquireNextImage` 返回 `vk::Result::eErrorOutOfDateKHR` 时，我们重建交换链并从 `drawFrame` 返回——但当前帧的栅栏在此前就已经被重置了，那时我们还不知道是否真的会提交工作。
+既然立刻返回，就没有任何工作被提交执行，栅栏永远不会被置位，于是下次等待同一个栅栏对象时，`vk::raii::Device::waitForFences` 就会永久卡住。
+
+好在修复很简单。
+把栅栏的重置推迟到我们确定要借助它提交工作之后。
+这样一来，如果提前返回，栅栏仍处于已置位状态，下次使用同一个栅栏对象时 `vk::raii::Device::waitForFences` 就不会死锁。
+
+`drawFrame` 的开头现在应该写成这样：
+
+[,c++]
+----
+auto fenceResult = device.waitForFences(*inFlightFences[frameIndex], vk::True, UINT64_MAX);
+if (fenceResult != vk::Result::eSuccess)
+{
+  throw std::runtime_error("failed to wait for fence!");
+}
+
+auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphores[frameIndex], nullptr);
+
+if (result == vk::Result::eErrorOutOfDateKHR)
+{
+    recreateSwapChain();
+    return;
+}
+if (result != vk::Result::eSuccess && result != vk::Result::eSuboptimalKHR)
+{
+    assert(result == vk::Result::eTimeout || result == vk::Result::eNotReady);
+    throw std::runtime_error("failed to acquire swap chain image!");
+}
+
+// 只有在提交工作时才重置栅栏
+device.resetFences(*inFlightFences[frameIndex]);
+----
+
+== 显式处理窗口尺寸改变
+
+尽管许多驱动和平台会在窗口尺寸改变后自动触发 `vk::Result::eErrorOutOfDateKHR`，但这并非必然发生。
+因此我们会额外加上一些代码，显式处理尺寸改变。
+首先新增一个成员变量，用来标记尺寸改变已经发生：
+
+[,c++]
+----
+bool framebufferResized = false;
+----
+
+然后修改 `drawFrame` 函数，让它也检查这个标志：
+
+[,c++]
+----
+if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR || framebufferResized)
+{
+    framebufferResized = false;
+    recreateSwapChain();
+}
+else
+{
+    ...
+}
+----
+
+这段判断必须放在 `vk::raii::Queue::presentKHR` 之后，以确保信号量处于一致状态，否则一个已置位的信号量可能永远得不到正确的等待。
+在前面的章节里我们禁用了窗口尺寸调整，要启用它，只需把 `GLFW_RESIZABLE` 提示设为 true。
+现在，为了真正检测尺寸改变，可以用 GLFW 框架里的 `glfwSetFramebufferSizeCallback` 函数注册回调：
+
+[,c++]
+----
+void initWindow()
+{
+    glfwInit();
+
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+
+    window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
+    glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+}
+
+static void framebufferResizeCallback(GLFWwindow* window, int width, int height)
+{
+}
+----
+
+之所以用 `static` 函数作为回调，是因为 GLFW 不知道如何携带正确的 `this` 指针去调用 `HelloTriangleApplication` 实例的成员函数。
+
+不过回调里确实能拿到指向 `GLFWwindow` 的引用，而 GLFW 还有一个函数允许你在其中存放任意指针：`glfwSetWindowUserPointer`：
+
+[,c++]
+----
+window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
+glfwSetWindowUserPointer(window, this);
+glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+----
+
+现在可以在回调里用 `glfwGetWindowUserPointer` 取出这个值，从而正确设置标志：
+
+[,c++]
+----
+static void framebufferResizeCallback(GLFWwindow* window, int width, int height)
+{
+    auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+    app->framebufferResized = true;
+}
+----
+
+现在运行程序并改变窗口大小，看看帧缓冲是否真的随窗口正确调整了尺寸。
+
+== 处理窗口最小化
+
+还有一种情况会让交换链过期，那就是一种特殊的窗口尺寸改变：窗口最小化。
+这种情况之所以特殊，是因为帧缓冲尺寸会变成 `0`。
+本教程的处理办法是：扩展 `recreateSwapChain` 函数，让它暂停下来，直到窗口重新回到前台：
+
+[,c++]
+----
+void recreateSwapChain() {
+    int width = 0, height = 0;
+    glfwGetFramebufferSize(window, &width, &height);
+    while ((width == 0 || height == 0) && !glfwWindowShouldClose(window)) {
+        glfwGetFramebufferSize(window, &width, &height);
+        glfwWaitEvents();
+    }
+    if (glfwWindowShouldClose(window)) {
+        return;
+    }
+
+    device.waitIdle();
+
+    ...
+}
+----
+
+第一次调用 `glfwGetFramebufferSize`，是为了处理尺寸本来就正确、`glfwWaitEvents` 没有事件可等的情况。
+`glfwWindowShouldClose` 的判断则处理窗口在仍处于最小化时被关闭的情况——没有它，循环会一直空转，等待一个再也不会变成非零的帧缓冲尺寸。
+
+恭喜，你已经完成了第一个行为规范的 Vulkan 程序！
+在 xref:04_Vertex_buffers/00_Vertex_input_description.adoc[下一章] 中，我们会去掉顶点着色器里硬编码的顶点，真正用上顶点缓冲区。
+
+link:/attachments/17_swap_chain_recreation.cpp[C{pp} 代码] /
+link:/attachments/09_shader_base.slang[Slang 着色器] /
+link:/attachments/09_shader_base.vert[GLSL 顶点着色器] /
+link:/attachments/09_shader_base.frag[GLSL 片元着色器]

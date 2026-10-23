@@ -1,0 +1,29 @@
+{
+  "name": "vulkan-tutorial-zh-site",
+  "version": "1.0.0",
+  "description": "Khronos Vulkan Tutorial 中文翻译的静态站点生成器",
+  "private": true,
+  "author": "Kalin",
+  "license": "MIT",
+  "scripts": {
+    "build": "node build-site.js",
+    "build:dist": "node build-site.js --dist",
+    "clean": "node site/clean.js",
+    "test": "node site/check.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "asciidoctor": "^4.0.0",
+    "cheerio": "^1.2.0",
+    "fs-extra": "^11.3.5",
+    "glob": "^13.0.6",
+    "katex": "^0.17.0",
+    "showdown": "^2.1.0",
+    "showdown-footnotes": "^2.1.2"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}

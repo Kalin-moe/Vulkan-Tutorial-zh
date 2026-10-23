@@ -1,0 +1,273 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--k-bg);
+}
+
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', sans-serif;
+  line-height: 1.75;
+  font-size: 1rem;
+  color: var(--k-text);
+  background: var(--k-bg);
+  overflow-x: hidden;
+}
+
+.markdown-body,
+.breadcrumb-wrapper {
+  max-width: 780px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.markdown-body,
+.markdown-body * {
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+.markdown-body {
+  overflow-x: hidden;
+}
+
+.markdown-body table,
+.markdown-body pre {
+  max-width: 100%;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6,
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body dl,
+.markdown-body blockquote,
+.markdown-body pre,
+.markdown-body table,
+.markdown-body .listingblock,
+.markdown-body .imageblock,
+.markdown-body .admonitionblock {
+  margin-bottom: 1.25rem;
+}
+
+.markdown-body h1 { font-size: 2rem; line-height: 1.25; letter-spacing: -0.01em; }
+.markdown-body h2 {
+  font-size: 1.5rem;
+  line-height: 1.4;
+  border-bottom: 1px solid var(--k-border-soft);
+  padding-bottom: 0.3rem;
+  margin-top: 2.2rem;
+}
+.markdown-body h3 { font-size: 1.2rem; margin-top: 1.8rem; }
+.markdown-body h4 { font-size: 1.05rem; margin-top: 1.4rem; }
+.markdown-body h2:first-child,
+.markdown-body h3:first-child { margin-top: 0; }
+
+.markdown-body a {
+  color: var(--k-link);
+  text-decoration: none;
+}
+.markdown-body a:hover { text-decoration: underline; }
+
+/* ---------- 代码 ---------- */
+.markdown-body pre {
+  background: var(--k-bg-soft);
+  border: 1px solid var(--k-border-faint);
+  border-radius: 8px;
+  padding-top: 2.2em;
+  overflow: hidden;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  position: relative;
+}
+
+.markdown-body pre code {
+  display: block;
+  overflow-x: auto;
+  background: transparent;
+  padding: 0.8rem 0.9rem;
+  white-space: pre;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+}
+
+.markdown-body code:not(pre code) {
+  background: var(--k-bg-softer);
+  border: 1px solid var(--k-border-faint);
+  padding: 0.1rem 0.35rem;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 0.88em;
+}
+
+/* AsciiDoc 的块标题（.标题 写在代码块/图片上方） */
+.markdown-body .listingblock > .title,
+.markdown-body .imageblock > .title,
+.markdown-body .tableblock > .title {
+  font-size: 0.85rem;
+  color: var(--k-text-muted);
+  margin-bottom: 0.4rem;
+}
+
+/* ---------- 提示块（NOTE / TIP / WARNING…） ---------- */
+.markdown-body .admonitionblock {
+  border-left: 4px solid var(--k-link);
+  background: var(--k-bg-soft);
+  border-radius: 8px;
+  padding: 0.8rem 1rem;
+}
+.markdown-body .admonitionblock table {
+  display: block;
+  border: 0;
+  margin: 0;
+  white-space: normal;
+}
+.markdown-body .admonitionblock tbody,
+.markdown-body .admonitionblock tr {
+  display: block;
+}
+.markdown-body .admonitionblock td {
+  border: 0;
+  padding: 0;
+  display: block;
+}
+.markdown-body .admonitionblock td.icon {
+  margin-bottom: 0.3rem;
+}
+.markdown-body .admonitionblock td.icon .title {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--k-text-muted);
+}
+.markdown-body .admonitionblock td.content > :last-child { margin-bottom: 0; }
+.markdown-body .admonitionblock.warning { border-left-color: #d97706; }
+.markdown-body .admonitionblock.caution { border-left-color: var(--k-danger); }
+.markdown-body .admonitionblock.tip { border-left-color: #16a34a; }
+
+/* ---------- 图片 / 表格 / 引用 ---------- */
+.markdown-body img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 1.25rem auto;
+  border-radius: 10px;
+}
+
+.markdown-body table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  width: 100%;
+  max-width: 100%;
+}
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--k-border);
+  padding: 0.5rem 0.65rem;
+  text-align: left;
+}
+.markdown-body th {
+  background: var(--k-bg-soft);
+  font-weight: 600;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.75rem;
+}
+.markdown-body li { margin-bottom: 0.25rem; }
+.markdown-body li > ul,
+.markdown-body li > ol { margin-bottom: 0; }
+
+.markdown-body blockquote {
+  border-left: 4px solid var(--k-border);
+  padding-left: 1rem;
+  color: var(--k-text-faint);
+  margin-left: 0;
+}
+
+.markdown-body dl { padding-left: 0; }
+.markdown-body dt { font-weight: 600; margin-top: 0.8rem; }
+.markdown-body dd { margin-left: 1.5rem; }
+
+.markdown-body hr {
+  border: 0;
+  border-top: 1px solid var(--k-border-faint);
+  margin: 2rem 0;
+}
+
+@media (max-width: 767px) {
+  body { font-size: 0.97rem; }
+  .markdown-body,
+  .breadcrumb-wrapper {
+    max-width: 100%;
+  }
+  .markdown-body h1 { font-size: 1.7rem; }
+  .markdown-body h2 { font-size: 1.35rem; }
+}
+
+/* ---------- 代码复制工具条（js/code-copy.js 注入） ---------- */
+.code-toolbar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.3em 0.8em;
+  background: var(--k-toolbar-bg);
+  border-bottom-left-radius: 6px;
+  border-top-right-radius: 8px;
+  font-size: 0.85em;
+  z-index: 10;
+  cursor: pointer;
+  user-select: none;
+}
+
+.code-lang {
+  font-weight: 600;
+  color: var(--k-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.copy-btn {
+  background: none;
+  border: none;
+  font-size: 1.1em;
+  padding: 0;
+  line-height: 1;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+  pointer-events: none;
+}
+.copy-btn:hover { opacity: 1; }
+
+.toc-body ul {
+  list-style: none;
+  padding-left: 0;
+}
+.toc-body ul ul { padding-left: 1.2rem; }
+.toc-body ul ul ul { padding-left: 2.4rem; }
+
+.nav-tree ul { padding-left: 1.2rem; }
+.nav-tree {
+  list-style: none;
+  padding-left: 0;
+}
+
+.toc-body a,
+.nav-file a,
+.nav-folder-name {
+  word-break: break-word;
+  overflow-wrap: break-word;
+}

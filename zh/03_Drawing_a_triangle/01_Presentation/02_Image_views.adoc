@@ -1,0 +1,122 @@
+:pp: {plus}{plus}
+
+= 图像视图
+
+要在渲染管线中使用任何 `vk::Image`（包括交换链中的图像），都必须创建
+`vk::raii::ImageView` 对象。图像视图字面上就是“图像的一个视图”。它描述
+如何访问图像、访问图像的哪一部分，例如是否应把它当作不带任何 mipmap
+层级的 2D 纹理或深度纹理来处理。
+
+本章我们会编写 `createImageViews` 函数，为交换链中的每张图像创建一个基本
+的图像视图，以便之后把它们用作颜色目标。
+
+先添加一个类成员来保存图像视图：
+
+[,c++]
+----
+std::vector<vk::raii::ImageView> swapChainImageViews;
+----
+
+创建 `createImageViews` 函数，并在交换链创建之后立即调用它。
+
+[,c++]
+----
+void initVulkan()
+{
+    createInstance();
+    setupDebugMessenger();
+    createSurface();
+    pickPhysicalDevice();
+    createLogicalDevice();
+    createSwapChain();
+    createImageViews();
+}
+
+void createImageViews()
+{
+}
+----
+
+图像视图的创建参数放在 `vk::ImageViewCreateInfo` 结构体中。`viewType`、
+`format` 和 `subresourceRange` 对每个图像视图都相同。
+
+`viewType` 指定我们渲染到 2D 屏幕。如果想渲染到 3D 屏幕或立方体贴图
+（cube map），这些也都是可选项，1D 屏幕同样如此。你大概能猜到，渲染到
+屏幕时，大多数情况下我们会用 2D 渲染目标。
+
+接着指定图像格式；颜色空间的各分量正是通过它来配置的，这样渲染结果才会
+是正确颜色的格式。
+
+再接下来是 components，交换链用不到它；不过稍后我们会谈到。
+
+最后一个成员是 subresourceRange，它是必需的，我们很快会讲到。
+
+[,c++]
+----
+void createImageViews()
+{
+    assert(swapChainImageViews.empty());
+
+    vk::ImageViewCreateInfo imageViewCreateInfo{ .viewType         = vk::ImageViewType::e2D,
+                                                 .format           = swapChainSurfaceFormat.format,
+                                                 .subresourceRange = { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 } };
+}
+----
+
+`components` 字段让你可以重排颜色通道的对应关系，例如把单色纹理的所有
+通道都映射到红色通道。也可以把常量 `0` 和 `1` 映射到某个通道。在我们的
+场景里，接受构造出的默认值、保持默认映射即可，不过显式写出来是这样：
+
+[,c++]
+----
+imageViewCreateInfo.components = {
+    vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity};
+----
+
+`subresourceRange` 字段描述图像的用途，以及应访问图像的哪一部分。我们的
+图像将用作颜色目标，不带任何 mipmap 层级，也不带多个层。
+注意：你可以像上面的代码片段那样列出 `subresourceRange` 的所有元素，也
+可以用指定初始化器只初始化与默认值不同的成员，像这样：
+
+[,c++]
+----
+imageViewCreateInfo.subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1};
+----
+
+如果你在做立体 3D 应用，就会创建带多个层的交换链。然后可以访问不同的层，
+为每张图像创建多个图像视图，分别表示左眼和右眼的视图。
+
+显卡能够处理的图像视图数量上限通常按 16 来估计。这个配置覆盖了大多数
+标准用例，VR/AR 头显通常需要不超过四个同时视图。不过，光场显示器和
+CAVE 显示器可能需要不同的方案，因为它们对同时视图的需求可能达到数千个。
+这些渲染上的特殊需求超出了本教程的范围，但即便是这些用例，也可以用我们
+这里描述的同样结构和技术来渲染。
+
+接下来，建立遍历所有交换链图像的循环，把它们加入我们的结构体。
+
+[,c++]
+----
+for (auto &image : swapChainImages)
+{
+    imageViewCreateInfo.image = image;
+}
+----
+
+现在创建图像视图只需使用 `vk::raii::ImageView` 的构造函数，这里通过
+`std::vector::emplace_back` 完成：
+
+[,c++]
+----
+for (auto &image : swapChainImages)
+{
+    imageViewCreateInfo.image = image;
+    swapChainImageViews.emplace_back( device, imageViewCreateInfo );
+}
+----
+
+有了图像视图，就足以开始把图像当作纹理使用，但要用作渲染目标还差一步。
+这需要帧缓冲。在
+xref:/03_Drawing_a_triangle/02_Graphics_pipeline_basics/00_Introduction.adoc[接下来几章]里，
+我们还要搭建图形管线。
+
+link:/attachments/07_image_views.cpp[C{pp} 代码]

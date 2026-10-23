@@ -1,0 +1,132 @@
+/* ============================================================
+   主题变量
+   html[data-theme] 由页面 <head> 里的内联脚本在首屏渲染前写入，
+   html[data-theme-mode] 记录用户选的是 auto / light / dark 三种模式。
+   ============================================================ */
+:root {
+  color-scheme: light;
+  --k-bg: #ffffff;
+  --k-bg-soft: #f6f8fa;
+  --k-bg-softer: #f0f0f0;
+  --k-surface: #ffffff;
+  --k-surface-alt: #fafafa;
+  --k-surface-translucent: rgba(255, 255, 255, 0.85);
+  --k-surface-translucent-hover: rgba(240, 240, 240, 0.9);
+  --k-text: #111111;
+  --k-text-soft: #333333;
+  --k-text-muted: #555555;
+  --k-text-faint: #6a737d;
+  --k-text-fainter: #8b949e;
+  --k-border: #dddddd;
+  --k-border-soft: #eaecef;
+  --k-border-faint: #e0e0e0;
+  --k-link: #0366d6;
+  --k-accent: #4a5568;
+  --k-accent-hover: #2d3748;
+  --k-highlight: #e8f0fe;
+  --k-toolbar-bg: rgba(0, 0, 0, 0.07);
+  --k-shadow: rgba(0, 0, 0, 0.12);
+  --k-shadow-strong: rgba(0, 0, 0, 0.2);
+  --k-scroll-thumb: #cccccc;
+  --k-danger: #e53e3e;
+  --k-grape-bg: #fef9e6;
+  --k-grape-border: #ffd966;
+  --k-grape-text: #8b5a2b;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --k-bg: #0d1117;
+  --k-bg-soft: #161b22;
+  --k-bg-softer: #21262d;
+  --k-surface: #161b22;
+  --k-surface-alt: #1c2128;
+  --k-surface-translucent: rgba(22, 27, 34, 0.85);
+  --k-surface-translucent-hover: rgba(33, 38, 45, 0.9);
+  --k-text: #e6edf3;
+  --k-text-soft: #c9d1d9;
+  --k-text-muted: #a9b4c0;
+  --k-text-faint: #8b949e;
+  --k-text-fainter: #7d8590;
+  --k-border: #30363d;
+  --k-border-soft: #30363d;
+  --k-border-faint: #21262d;
+  --k-link: #58a6ff;
+  --k-accent: #4a5568;
+  --k-accent-hover: #5a6678;
+  --k-highlight: #1f2a44;
+  --k-toolbar-bg: rgba(255, 255, 255, 0.08);
+  --k-shadow: rgba(0, 0, 0, 0.45);
+  --k-shadow-strong: rgba(0, 0, 0, 0.6);
+  --k-scroll-thumb: #4a5260;
+  --k-danger: #f56565;
+  --k-grape-bg: #2b2413;
+  --k-grape-border: #6b5a1e;
+  --k-grape-text: #e6c07b;
+}
+
+/* ============================================================
+   主题切换按钮
+   两种摆放方式：
+   - .theme-toggle--header  ：跟在顶部标题行里，靠右对齐页面主体
+   - .theme-toggle--floating：无装饰页面，悬浮在右上角
+   ============================================================ */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.3rem;
+  height: 1.9rem;
+  padding: 0;
+  border: 1px solid var(--k-border);
+  border-radius: 10px;
+  background: var(--k-surface);
+  color: var(--k-text-muted);
+  cursor: pointer;
+  line-height: 1;
+  transition: background 0.2s, color 0.2s, border-color 0.2s;
+  -webkit-tap-highlight-color: transparent;
+}
+.theme-toggle:hover {
+  color: var(--k-text);
+  border-color: var(--k-text-fainter);
+}
+.theme-toggle:focus-visible {
+  outline: 2px solid var(--k-link);
+  outline-offset: 2px;
+}
+
+.theme-icon {
+  display: none;
+  width: 1.05rem;
+  height: 1.05rem;
+}
+/* 内联脚本没跑（例如被禁用 JS）时退回到「自动」图标 */
+html:not([data-theme-mode]) .theme-toggle .theme-icon--auto,
+html[data-theme-mode="auto"] .theme-toggle .theme-icon--auto,
+html[data-theme-mode="light"] .theme-toggle .theme-icon--light,
+html[data-theme-mode="dark"] .theme-toggle .theme-icon--dark {
+  display: block;
+}
+
+/* 非无装饰页面：跟在顶栏那一行后面，靠 .top-bar-inner 上的 auto margin 顶到右边缘 */
+.theme-toggle--header {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+/* 无装饰页面：右上角悬浮，沿用导航栏版本移动端那颗按钮的手感 */
+.theme-toggle--floating {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 1001;
+  box-shadow: 0 2px 12px var(--k-shadow);
+}
+
+/* 悬浮按钮会压在正文/标题上，窄屏给它让出一行 */
+@media (max-width: 900px) {
+  body.has-floating-theme {
+    padding-top: 3.6rem;
+  }
+}

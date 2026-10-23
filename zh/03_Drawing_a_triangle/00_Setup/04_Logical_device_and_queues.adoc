@@ -1,0 +1,215 @@
+:pp: {plus}{plus}
+
+= 逻辑设备与队列
+
+== 引言
+
+选定要使用的物理设备之后，还需要创建**逻辑设备**来与它对接。逻辑设备的
+创建过程与实例创建类似，同样要描述我们想使用的特性。既然已经查询了
+有哪些队列族可用，现在还要指定要创建哪些队列。如果有不同需求，你甚至
+可以从同一个物理设备创建多个逻辑设备。
+
+先在类中添加一个新成员，用来保存逻辑设备句柄。
+
+[,c++]
+----
+vk::raii::Device device = nullptr;
+----
+
+接着添加 `createLogicalDevice` 函数，由 `initVulkan` 调用。
+
+[,c++]
+----
+void initVulkan() {
+    createInstance();
+    setupDebugMessenger();
+    pickPhysicalDevice();
+    createLogicalDevice();
+}
+
+void createLogicalDevice() {
+
+}
+----
+
+== 指定要创建的队列
+
+创建逻辑设备同样要在结构体里指定一堆细节，第一个是
+`vk::DeviceQueueCreateInfo`。这个结构体描述我们想从单个队列族中创建多少个
+队列。目前我们只关心具备图形能力的队列。
+
+[,c++]
+----
+std::vector<vk::QueueFamilyProperties> queueFamilyProperties = physicalDevice.getQueueFamilyProperties();
+auto graphicsQueueFamilyProperty = std::ranges::find_if(queueFamilyProperties, [](auto const &qfp) { return (qfp.queueFlags & vk::QueueFlagBits::eGraphics) != static_cast<vk::QueueFlags>(0); });
+auto graphicsIndex = static_cast<uint32_t>(std::distance(queueFamilyProperties.begin(), graphicsQueueFamilyProperty));
+vk::DeviceQueueCreateInfo deviceQueueCreateInfo { .queueFamilyIndex = graphicsIndex };
+----
+
+当前可用的驱动对每个队列族只允许创建少量队列，而你也确实不需要多于
+一个。因为你可以在多个线程上分别创建命令缓冲区，然后在主线程上用一次
+低开销调用把它们全部提交。
+
+Vulkan 允许用 `0.0` 到 `1.0` 之间的浮点数给队列指定优先级，从而影响命令
+缓冲区执行的调度。即使只有一个队列，也必须提供这个值：
+
+[,c++]
+----
+float queuePriority = 0.5f;
+vk::DeviceQueueCreateInfo deviceQueueCreateInfo { .queueFamilyIndex = graphicsIndex, .queueCount = 1, .pQueuePriorities = &queuePriority };
+----
+
+== 指定要使用的设备特性
+
+接下来要指定我们将使用的设备特性集合。这些正是上一章里用
+`vk::raii::PhysicalDevice::getFeatures` 查询过支持情况的特性，例如几何
+着色器。目前我们不需要任何特殊特性，所以定义它、让所有字段保持
+`vk::False` 即可。等准备用 Vulkan 做些更有意思的事情时，我们会再回到
+这个结构体。
+
+[,c++]
+----
+vk::PhysicalDeviceFeatures deviceFeatures;
+----
+
+== 启用额外的设备特性
+
+Vulkan 在设计上保持向后兼容，这意味着默认情况下你只能使用 Vulkan 1.0
+就有的基础特性。要使用更新的特性，必须在创建设备时显式请求。
+
+在 Vulkan 中，特性按引入时间或所属功能组织成不同的结构体。例如：
+- 基础特性位于 `vk::PhysicalDeviceFeatures`
+- Vulkan 1.3 特性位于 `vk::PhysicalDeviceVulkan13Features`
+- 扩展特有的特性位于各自的结构体（如 `vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT`）
+
+要启用多组特性，Vulkan 使用了名为“结构链”的概念。每个特性结构体都有
+`pNext` 字段，可以指向另一个结构体，从而把特性请求串成一条链。
+
+C++ Vulkan API 提供了名为 `vk::StructureChain` 的辅助模板，让这个过程
+更简单。来看怎么用：
+
+[,c++]
+----
+// 创建一条特性结构体链
+vk::StructureChain<vk::PhysicalDeviceFeatures2,
+                   vk::PhysicalDeviceVulkan11Features,
+                   vk::PhysicalDeviceVulkan13Features,
+                   vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>
+    featureChain = {
+        {},                                    // vk::PhysicalDeviceFeatures2（暂时为空）
+        {.shaderDrawParameters = true},        // 启用 Vulkan 1.1 的着色器绘制参数
+        {.dynamicRendering = true},            // 启用 Vulkan 1.3 的动态渲染
+        {.extendedDynamicState = true}         // 启用该扩展的扩展动态状态
+    };
+----
+
+这段代码做了这些事情：
+
+1. 创建一个 `vk::StructureChain`，其中包含三个不同的特性结构体。
+2. 为链中的每个结构体提供一个初始化器：
+   - 第一个结构体（`vk::PhysicalDeviceFeatures2`）用 `{}` 留空
+   - 第二个结构体中，启用 Vulkan 1.1 的 `shaderDrawParameters` 特性
+   - 第三个结构体中，启用 Vulkan 1.3 的 `dynamicRendering` 特性
+   - 第四个结构体中，启用某个扩展提供的 `extendedDynamicState` 特性
+
+`vk::StructureChain` 模板通过设置各结构体之间的 `pNext` 指针，自动把它们
+连接起来，省去了手动逐个链接的麻烦。
+
+稍后创建逻辑设备时，我们传入指向这条链中第一个结构体的指针，Vulkan 就能
+看到我们想启用的所有特性。
+
+== 指定设备扩展
+
+为了让应用正常工作，我们需要启用某些设备扩展。这些扩展提供本教程后面
+会用到的额外功能。
+
+[,c++]
+----
+std::vector<const char*> requiredDeviceExtension = {
+    vk::KHRSwapchainExtensionName};
+----
+
+`VK_KHR_swapchain` 扩展是把渲染好的图像呈现到窗口所必需的。其他扩展
+提供的额外功能会在教程后续部分用到。
+
+== 创建逻辑设备
+
+必要信息齐备之后，就可以创建逻辑设备了。需要填写 `vk::DeviceCreateInfo`
+结构体，并把特性链接到它上面：
+
+[,c++]
+----
+vk::DeviceCreateInfo deviceCreateInfo{
+    .pNext = &featureChain.get<vk::PhysicalDeviceFeatures2>(),
+    .queueCreateInfoCount = 1,
+    .pQueueCreateInfos = &deviceQueueCreateInfo,
+    .enabledExtensionCount = static_cast<uint32_t>(requiredDeviceExtension.size()),
+    .ppEnabledExtensionNames = requiredDeviceExtension.data()
+};
+----
+
+回顾一下我们如何把特性链接入设备创建流程：
+
+1. `featureChain.get<vk::PhysicalDeviceFeatures2>()` 方法取得链中第一个
+   结构体（即 `vk::PhysicalDeviceFeatures2`）的引用。
+
+2. 把这个引用赋给 `deviceCreateInfo` 结构体的 `pNext` 字段。
+
+3. 由于特性链中的所有结构体都已连接好（这归功于 `vk::StructureChain`），
+   Vulkan 顺着 `pNext` 指针链就能看到我们想启用的所有特性。
+
+这种做法让我们能以清晰、有条理的方式请求多组特性。Vulkan 会在创建设备
+时依次处理链中的每个结构体，并启用所请求的特性。
+
+其余信息与 `vk::InstanceCreateInfo` 结构体相似，同样需要你指定扩展，区别
+在于这次是设备相关的扩展。
+
+设备相关扩展的一个例子是 `VK_KHR_swapchain`，它允许你从该设备把渲染好的
+图像呈现到窗口。系统中也可能存在不具备这种能力的 Vulkan 设备，例如只
+支持计算操作的设备。我们会在交换链一章再讨论这个扩展。
+
+早期的 Vulkan 实现会区分实例级和设备级的验证层，但
+link:https://docs.vulkan.org/spec/latest/chapters/raytracing.html#extendingvulkan-layers-devicelayerdeprecation[如今已不再如此]。
+这意味着，`vk::DeviceCreateInfo` 的 `enabledLayerCount` 和
+`ppEnabledLayerNames` 字段会被最新的实现忽略。
+
+填好 `vk::DeviceCreateInfo` 之后，就可以继续创建逻辑设备了。
+
+[,c++]
+----
+device = vk::raii::Device(physicalDevice, deviceCreateInfo);
+----
+
+传入的参数是要对接的物理设备，以及刚写好的创建信息。此外还有可选参数：
+分配回调指针，以及一个指定在何处保存所创建逻辑设备句柄的指针。在我们的
+写法里，函数调用直接返回 `vk::Device` 句柄。与实例创建函数类似，如果
+启用了不存在的扩展，或指定使用不受支持的特性，这个调用会抛出错误。
+
+逻辑设备并不直接与实例交互，因此实例没有作为参数传入。
+
+== 获取队列句柄
+
+队列会随逻辑设备一起自动创建，但我们还没有能与它们打交道的句柄。
+先添加一个类成员，用来保存图形队列的句柄：
+
+[,c++]
+----
+vk::raii::Queue graphicsQueue = nullptr;
+----
+
+设备销毁时，设备队列会被隐式清理，因此 `cleanup` 中无需做任何事。
+
+可以用 `vk::raii::Queue` 构造函数取得某个队列族的队列句柄。参数是逻辑
+设备、队列族索引和队列索引。由于我们只从这个族里创建一个队列，队列
+索引直接用 `0`。
+
+[,c++]
+----
+graphicsQueue = vk::raii::Queue(device, graphicsIndex, 0);
+----
+
+有了逻辑设备和队列句柄，现在就可以真正让显卡干活了！在
+xref:/03_Drawing_a_triangle/01_Presentation/00_Window_surface.adoc[接下来几章]里，
+我们会搭建资源，把结果呈现到窗口系统。
+
+link:/attachments/04_logical_device.cpp[C{pp} 代码]

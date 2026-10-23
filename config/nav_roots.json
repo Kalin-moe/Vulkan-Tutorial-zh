@@ -1,0 +1,24 @@
+{
+  "name": "Vulkan 教程",
+  "tagline": "Khronos Vulkan® Tutorial · 中文翻译",
+  "author": "Kalin",
+  "repo": "https://github.com/Kalin-moe/Vulkan-Tutorial-zh",
+  "external_fallback_base": "https://docs.vulkan.org/tutorial/latest/",
+  "roots": [
+    {
+      "path": "zh",
+      "template": "templates/template_nav.html",
+      "title": "目录"
+    }
+  ],
+  "folder_titles": {
+    "03_Drawing_a_triangle": "绘制三角形",
+    "03_Drawing_a_triangle/00_Setup": "初始化",
+    "03_Drawing_a_triangle/01_Presentation": "呈现",
+    "03_Drawing_a_triangle/02_Graphics_pipeline_basics": "图形管线基础",
+    "03_Drawing_a_triangle/03_Drawing": "绘制",
+    "04_Vertex_buffers": "顶点缓冲区",
+    "05_Uniform_buffers": "统一缓冲区",
+    "06_Texture_mapping": "纹理贴图"
+  }
+}

@@ -1,0 +1,530 @@
+:pp: {plus}{plus}
+
+= Vulkan 多线程
+
+== 简介
+
+本章将探讨如何借助 Vulkan 的多线程能力提升应用性能。现代 CPU 拥有多个核心，高效利用这些核心能显著改善应用性能，对计算密集型任务尤其如此。Vulkan 的显式设计使它能很好地适配多线程架构，让你可以细粒度地控制同步与资源访问。
+
+== 概述
+
+Vulkan 在设计之初就考虑了多线程，与旧一些的 API 相比有几项优势：
+
+1. *线程安全的命令缓冲区录制*：多个线程可以同时向不同的命令缓冲区录制命令。
+2. *显式同步*：Vulkan 要求显式同步，让你能精确控制跨线程的资源访问。
+3. *基于队列的架构*：不同操作可以提交到不同队列，从而有可能并行执行。
+
+不过，在 Vulkan 中用好多线程需要仔细考虑：
+
+1. *资源共享*：确保跨线程访问共享资源是安全的。
+2. *同步*：正确同步线程之间的操作。
+3. *工作分配*：有效分配工作，以最大化并行度。
+
+本章将实现一个多线程渲染系统，它建立在之前计算着色器的工作之上。我们将创建一个粒子系统，其中：
+
+1. 一个线程处理窗口事件与图像呈现
+2. 多个工作线程为不同的粒子组录制命令缓冲区
+3. 一个专门的线程负责向 GPU 提交工作
+
+== 实现
+
+下面逐一介绍在 Vulkan 应用中实现多线程所需的关键组件：
+
+=== 线程安全的资源管理
+
+首先，要确保资源在线程之间被安全访问。我们会组合使用几种技术：
+
+[,c{pp}]
+----
+// 线程安全的资源管理器
+class ThreadSafeResourceManager {
+private:
+    std::mutex resourceMutex;
+    // 需要线程安全访问的资源
+    std::vector<vk::raii::CommandPool> commandPools;
+    std::vector<vk::raii::CommandBuffer> commandBuffers;
+
+public:
+    // 为每个工作线程创建命令池
+    void createThreadCommandPools(vk::raii::Device& device, uint32_t queueFamilyIndex, uint32_t threadCount) {
+        std::lock_guard<std::mutex> lock(resourceMutex);
+
+        commandPools.clear();
+        for (uint32_t i = 0; i < threadCount; i++) {
+            vk::CommandPoolCreateInfo poolInfo{
+                .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+                .queueFamilyIndex = queueFamilyIndex
+            };
+            commandPools.emplace_back(device, poolInfo);
+        }
+    }
+
+    // 获取指定线程的命令池
+    vk::raii::CommandPool& getCommandPool(uint32_t threadIndex) {
+        std::lock_guard<std::mutex> lock(resourceMutex);
+        return commandPools[threadIndex];
+    }
+
+    // 为每个线程分配命令缓冲区
+    void allocateCommandBuffers(vk::raii::Device& device, uint32_t threadCount, uint32_t buffersPerThread) {
+        std::lock_guard<std::mutex> lock(resourceMutex);
+
+        commandBuffers.clear();
+        for (uint32_t i = 0; i < threadCount; i++) {
+            vk::CommandBufferAllocateInfo allocInfo{
+                .commandPool = *commandPools[i],
+                .level = vk::CommandBufferLevel::ePrimary,
+                .commandBufferCount = buffersPerThread
+            };
+            auto threadBuffers = device.allocateCommandBuffers(allocInfo);
+            for (auto& buffer : threadBuffers) {
+                commandBuffers.emplace_back(std::move(buffer));
+            }
+        }
+    }
+
+    // 获取命令缓冲区
+    vk::raii::CommandBuffer& getCommandBuffer(uint32_t index) {
+        std::lock_guard<std::mutex> lock(resourceMutex);
+        return commandBuffers[index];
+    }
+};
+----
+
+=== 工作线程实现
+
+接下来实现工作线程，由它们为不同的粒子组录制命令缓冲区：
+
+[,c{pp}]
+----
+class MultithreadedApplication {
+private:
+    // 线程相关成员
+    uint32_t threadCount;
+    std::vector<std::thread> workerThreads;
+    std::atomic<bool> shouldExit{false};
+    std::vector<std::atomic<bool>> threadWorkReady;
+    std::vector<std::atomic<bool>> threadWorkDone;
+
+    // 同步原语
+    std::mutex queueSubmitMutex;
+    std::condition_variable workCompleteCv;
+
+    // 资源管理器
+    ThreadSafeResourceManager resourceManager;
+
+    // 粒子系统数据
+    struct ParticleGroup {
+        uint32_t startIndex;
+        uint32_t count;
+    };
+    std::vector<ParticleGroup> particleGroups;
+
+    // ……其他 Vulkan 资源……
+
+public:
+    void initThreads() {
+        // 确定要使用的线程数（为主线程留出一个核心）
+        threadCount = std::max(1u, std::thread::hardware_concurrency() - 1);
+
+        // 初始化同步原语
+        threadWorkReady.resize(threadCount);
+        threadWorkDone.resize(threadCount);
+
+        for (uint32_t i = 0; i < threadCount; i++) {
+            threadWorkReady[i] = false;
+            threadWorkDone[i] = true;
+        }
+
+        // 为每个线程创建命令池
+        resourceManager.createThreadCommandPools(device, graphicsQueueFamilyIndex, threadCount);
+
+        // 把粒子分组，每个线程一组
+        const uint32_t particlesPerThread = PARTICLE_COUNT / threadCount;
+        particleGroups.resize(threadCount);
+
+        for (uint32_t i = 0; i < threadCount; i++) {
+            particleGroups[i].startIndex = i * particlesPerThread;
+            particleGroups[i].count = (i == threadCount - 1) ?
+                (PARTICLE_COUNT - i * particlesPerThread) : particlesPerThread;
+        }
+
+        // 启动工作线程
+        for (uint32_t i = 0; i < threadCount; i++) {
+            workerThreads.emplace_back(&MultithreadedApplication::workerThreadFunc, this, i);
+        }
+    }
+
+    void workerThreadFunc(uint32_t threadIndex) {
+        while (!shouldExit) {
+            // 等待工作就绪
+            if (!threadWorkReady[threadIndex]) {
+                std::this_thread::yield();
+                continue;
+            }
+
+            // 获取该线程的粒子组
+            const ParticleGroup& group = particleGroups[threadIndex];
+
+            // 获取该线程的命令缓冲区
+            vk::raii::CommandBuffer& cmdBuffer = resourceManager.getCommandBuffer(threadIndex);
+
+            // 为该粒子组录制命令
+            recordComputeCommandBuffer(cmdBuffer, group.startIndex, group.count);
+
+            // 标记工作已完成
+            threadWorkDone[threadIndex] = true;
+            threadWorkReady[threadIndex] = false;
+
+            // 通知主线程
+            workCompleteCv.notify_one();
+        }
+    }
+
+    void recordComputeCommandBuffer(vk::raii::CommandBuffer& cmdBuffer, uint32_t startIndex, uint32_t count) {
+        cmdBuffer.reset();
+        cmdBuffer.begin({});
+
+        // 绑定计算管线和描述符集
+        cmdBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, *computePipeline);
+        cmdBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *computePipelineLayout, 0, {*computeDescriptorSets[frameIndex]}, {});
+
+        // 用推送常量指定该线程负责的粒子范围
+        struct PushConstants {
+            uint32_t startIndex;
+            uint32_t count;
+        } pushConstants{startIndex, count};
+
+        cmdBuffer.pushConstants<PushConstants>(*computePipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, pushConstants);
+
+        // 调度计算工作
+        uint32_t groupCount = (count + 255) / 256;
+        cmdBuffer.dispatch(groupCount, 1, 1);
+
+        cmdBuffer.end();
+    }
+
+    void signalThreadsToWork() {
+        // 通知所有线程开始工作
+        for (uint32_t i = 0; i < threadCount; i++) {
+            threadWorkDone[i] = false;
+            threadWorkReady[i] = true;
+        }
+    }
+
+    void waitForThreadsToComplete() {
+        // 等待所有线程完成工作
+        std::unique_lock<std::mutex> lock(queueSubmitMutex);
+        workCompleteCv.wait(lock, [this]() {
+            for (uint32_t i = 0; i < threadCount; i++) {
+                if (!threadWorkDone[i]) {
+                    return false;
+                }
+            }
+            return true;
+        });
+    }
+
+    void cleanup() {
+        // 通知线程退出并等待它们结束
+        shouldExit = true;
+        for (auto& thread : workerThreads) {
+            if (thread.joinable()) {
+                thread.join();
+            }
+        }
+
+        // ……清理其他资源……
+    }
+};
+----
+
+=== 修改计算着色器
+
+需要修改计算着色器，让它按推送常量指定的粒子范围工作：
+
+[,c{pp}]
+----
+// 在计算着色器中（31_shader_compute.slang）
+[[vk::push_constant]]
+struct PushConstants {
+    uint startIndex;
+    uint count;
+};
+
+[[vk::binding(0, 0)]] ConstantBuffer<UniformBufferObject> ubo;
+[[vk::binding(1, 0)]] RWStructuredBuffer<Particle> particlesIn;
+[[vk::binding(2, 0)]] RWStructuredBuffer<Particle> particlesOut;
+PushConstants pushConstants;
+
+[numthreads(256,1,1)]
+void compMain(uint3 threadId : SV_DispatchThreadID)
+{
+    uint index = threadId.x;
+
+    // 只处理分配给自己的范围内的粒子
+    if (index >= pushConstants.count) {
+        return;
+    }
+
+    // 调整索引，使其从分配给自己的起始索引开始
+    uint globalIndex = pushConstants.startIndex + index;
+
+    // 处理该粒子
+    Particle particle = particlesIn[globalIndex];
+
+    // 根据速度和 deltaTime 更新粒子位置
+    particle.position += particle.velocity * ubo.deltaTime;
+
+    // 简单的边界检查，并反转速度
+    if (abs(particle.position.x) > 1.0) {
+        particle.velocity.x *= -1.0;
+    }
+    if (abs(particle.position.y) > 1.0) {
+        particle.velocity.y *= -1.0;
+    }
+
+    // 把更新后的粒子写入输出缓冲区
+    particlesOut[globalIndex] = particle;
+}
+----
+
+=== 更新主循环
+
+最后更新主循环，以协调各个工作线程：
+
+[,c{pp}]
+----
+void drawFrame() {
+    // 等待上一帧完成
+    auto fenceResult = device.waitForFences(*inFlightFences[frameIndex], vk::True, UINT64_MAX);
+    if (fenceResult != vk::Result::eSuccess)
+    {
+        throw std::runtime_error("failed to wait for fence!");
+    }
+
+    // 获取下一张图像
+    auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *imageAvailableSemaphores[frameIndex], nullptr);
+
+    if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR || framebufferResized) {
+        framebufferResized = false;
+        recreateSwapChain();
+        return;
+    }
+
+    // 更新统一缓冲区
+    updateUniformBuffer(frameIndex);
+
+    // 通知工作线程开始录制计算命令缓冲区
+    signalThreadsToWork();
+
+    // 趁工作线程忙碌时，在主线程录制图形命令缓冲区
+    recordGraphicsCommandBuffer(imageIndex);
+
+    // 等待所有工作线程完成
+    waitForThreadsToComplete();
+
+    // 收集所有线程的命令缓冲区
+    std::vector<vk::CommandBuffer> computeCmdBuffers;
+    for (uint32_t i = 0; i < threadCount; i++) {
+        computeCmdBuffers.push_back(*resourceManager.getCommandBuffer(i));
+    }
+
+    // 提交计算工作
+    vk::SubmitInfo computeSubmitInfo{
+        .commandBufferCount = static_cast<uint32_t>(computeCmdBuffers.size()),
+        .pCommandBuffers = computeCmdBuffers.data()
+    };
+
+    {
+        std::lock_guard<std::mutex> lock(queueSubmitMutex);
+        computeQueue.submit(computeSubmitInfo, nullptr);
+    }
+
+    // 等计算完成后再进行图形工作
+    vk::PipelineStageFlags waitStages[] = {vk::PipelineStageFlagBits::eVertexInput};
+
+    // 提交图形工作
+    vk::SubmitInfo graphisSubmitInfo{.waitSemaphoreCount   = 1,
+                                      .pWaitSemaphores      = &*imageAvailableSemaphores[frameIndex],
+                                      .pWaitDstStageMask    = &waitDestinationStageMask,
+                                      .commandBufferCount   = 1,
+                                      .pCommandBuffers      = &*graphicsCommandBuffers[frameIndex],
+                                      .signalSemaphoreCount = 1,
+                                      .pSignalSemaphores    = &*renderFinishedSemaphores[imageIndex]};
+
+    {
+        std::lock_guard<std::mutex> lock(queueSubmitMutex);
+        device.resetFences(*inFlightFences[frameIndex]);
+        graphicsQueue.submit(graphicsSubmitInfo, *inFlightFences[frameIndex]);
+    }
+
+    // 呈现图像
+    vk::PresentInfoKHR presentInfo{
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &*renderFinishedSemaphores[frameIndex],
+        .swapchainCount = 1,
+        .pSwapchains = &*swapChain,
+        .pImageIndices = &imageIndex
+    };
+
+    result = presentQueue.presentKHR(presentInfo);
+
+    if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR || framebufferResized) {
+        framebufferResized = false;
+        recreateSwapChain();
+    } else if (result != vk::Result::eSuccess) {
+        throw std::runtime_error("failed to present swap chain image!");
+    }
+
+    frameIndex = (frameIndex + 1) % MAX_FRAMES_IN_FLIGHT;
+}
+----
+
+== 进阶多线程技巧
+
+在上述基础实现之外，还有几种进阶技巧可进一步优化多线程 Vulkan 应用：
+
+=== 次级命令缓冲区
+
+次级命令缓冲区可以并行录制，再由主命令缓冲区执行：
+
+[,c{pp}]
+----
+// 在工作线程中：
+vk::CommandBufferInheritanceInfo inheritanceInfo{
+    .renderPass = *renderPass,
+    .subpass = 0,
+    .framebuffer = *framebuffers[imageIndex]
+};
+
+vk::CommandBufferBeginInfo beginInfo{
+    .flags = vk::CommandBufferUsageFlagBits::eRenderPassContinue,
+    .pInheritanceInfo = &inheritanceInfo
+};
+
+secondaryCommandBuffer.begin(beginInfo);
+// 录制渲染命令……
+secondaryCommandBuffer.end();
+
+// 在主线程中：
+primaryCommandBuffer.begin({});
+primaryCommandBuffer.beginRenderPass(...);
+primaryCommandBuffer.executeCommands(secondaryCommandBuffers);
+primaryCommandBuffer.endRenderPass();
+primaryCommandBuffer.end();
+----
+
+=== 用线程池动态分配工作
+
+除了给每个线程分配固定的工作，也可以使用线程池动态分配工作：
+
+[,c{pp}]
+----
+class ThreadPool {
+private:
+    std::vector<std::thread> workers;
+    std::queue<std::function<void()>> tasks;
+    std::mutex queueMutex;
+    std::condition_variable condition;
+    bool stop;
+
+public:
+    ThreadPool(size_t threads) : stop(false) {
+        for (size_t i = 0; i < threads; ++i) {
+            workers.emplace_back([this] {
+                while (true) {
+                    std::function<void()> task;
+                    {
+                        std::unique_lock<std::mutex> lock(queueMutex);
+                        condition.wait(lock, [this] { return stop || !tasks.empty(); });
+                        if (stop && tasks.empty()) {
+                            return;
+                        }
+                        task = std::move(tasks.front());
+                        tasks.pop();
+                    }
+                    task();
+                }
+            });
+        }
+    }
+
+    template<class F>
+    void enqueue(F&& f) {
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            tasks.emplace(std::forward<F>(f));
+        }
+        condition.notify_one();
+    }
+
+    ~ThreadPool() {
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            stop = true;
+        }
+        condition.notify_all();
+        for (std::thread& worker : workers) {
+            worker.join();
+        }
+    }
+};
+----
+
+=== 异步加载资源
+
+可以用多线程异步加载资源：
+
+[,c{pp}]
+----
+std::future<TextureData> loadTextureAsync(const std::string& filename) {
+    return std::async(std::launch::async, [filename]() {
+        TextureData data;
+        // 从文件加载纹理数据
+        return data;
+    });
+}
+
+// 稍后在代码中：
+auto textureDataFuture = loadTextureAsync("texture.ktx");
+// 做其他工作……
+TextureData textureData = textureDataFuture.get(); // 如有需要，等待完成
+// 用加载的数据创建 Vulkan 纹理
+----
+
+== 性能考量
+
+在 Vulkan 中实现多线程时，请留意以下性能要点：
+
+1. *线程创建开销*：创建线程是有开销的，应在启动时一次创建，而不是每帧都创建。
+2. *工作粒度*：确保每个线程的工作量足以抵消多线程带来的开销。
+3. *伪共享*：多个线程访问相邻内存时，要留意缓存行争用。
+4. *队列提交*：队列提交应当同步，以避免竞态条件。
+5. *内存屏障*：正确使用内存屏障，确保内存操作在线程之间可见。
+6. *每线程一个命令池*：每个线程都应拥有自己的命令池，以避免同步开销。
+7. *测量性能*：一定要实测，确认多线程确实提升了性能。
+
+== 调试多线程 Vulkan 应用
+
+调试多线程应用可能很有挑战。下面是一些建议：
+
+1. *验证层*：启用 Vulkan 验证层，以捕获同步问题。
+2. *线程检测工具*：使用 ThreadSanitizer 之类的工具检测数据竞争。
+3. *日志*：实现线程安全的日志，以跟踪执行流程。
+4. *简化*：从较简单的线程模型开始，再逐步增加复杂度。
+5. *原子操作*：用原子操作实现线程安全的计数器和标志。
+
+== 小结
+
+本章探讨了如何借助 Vulkan 的多线程能力提升性能，并实现了一个多线程粒子系统，其中：
+
+1. 多个工作线程并行录制命令缓冲区
+2. 主线程协调工作并负责图像呈现
+3. 恰当的同步保证了线程安全
+
+把工作分摊到多个 CPU 核心上，能显著提升性能，计算密集型应用尤其明显。Vulkan 的显式设计使它能很好地适配多线程架构，让你可以细粒度地控制同步与资源访问。
+
+在后续开发 Vulkan 应用时，不妨思考多线程如何帮你发挥现代 CPU 的全部能力，同时记得始终测量性能，确认你的线程模型对你的具体场景确实有好处。
+
+link:/attachments/37_multithreading.cpp[C{pp} 代码]

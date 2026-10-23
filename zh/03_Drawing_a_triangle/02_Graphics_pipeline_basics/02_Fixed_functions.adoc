@@ -1,0 +1,261 @@
+:pp: {plus}{plus}
+
+= 固定功能
+
+较旧的图形 API 为图形管线的多数阶段提供了默认状态。在 Vulkan 中，你必须显式指定大多数管线状态，因为它们会被固化进一个不可变的管线状态对象。本章我们会填写所有结构体，用来配置这些固定功能操作。
+
+[[dynamic-state]]
+== 动态状态
+
+虽然**大多数**管线状态都需要固化进管线状态，但仍有少量状态**可以**在绘制时改变，而无需重建管线，例如视口大小、线宽和混合常量。如果你想使用动态状态、把这些属性排除在外，就需要像这样填写 `vk::PipelineDynamicStateCreateInfo` 结构体：
+
+[,c++]
+----
+std::vector<vk::DynamicState> dynamicStates = {vk::DynamicState::eViewport, vk::DynamicState::eScissor};
+
+vk::PipelineDynamicStateCreateInfo dynamicState{.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()), .pDynamicStates = dynamicStates.data()};
+----
+
+这会让这些值的配置被忽略，你便能够（也必须）在绘制时指定数据。这样做更灵活，视口和裁剪状态尤其普遍采用动态方式；若把它们固化进管线状态，配置会复杂得多。
+
+== 顶点输入
+
+`vk::PipelineVertexInputStateCreateInfo` 结构体描述将传递给顶点着色器的顶点数据格式。它大致从两方面描述：
+
+* 绑定（binding）：数据之间的间距，以及数据是逐顶点还是逐实例（参见 https://en.wikipedia.org/wiki/Geometry_instancing[实例化]）
+* 属性描述：传递给顶点着色器的属性类型、从哪个绑定加载、偏移量是多少
+
+由于我们直接在顶点着色器中硬编码顶点数据，所以会把该结构体留空，表示目前没有顶点数据需要加载。等讲到顶点缓冲区那一章再回来看它。
+
+[,c++]
+----
+vk::PipelineVertexInputStateCreateInfo vertexInputInfo;
+----
+
+`pVertexBindingDescriptions` 和 `pVertexAttributeDescriptions` 成员指向结构体数组，这些结构体描述了上述加载顶点数据的细节。把这个结构体加到 `createGraphicsPipeline` 函数里，位置就在 `shaderStages` 数组之后。
+
+== 输入装配
+
+`vk::PipelineInputAssemblyStateCreateInfo` 结构体描述两件事：从顶点绘制哪种几何图元，以及是否启用图元重启（primitive restart）。前者由 `topology` 成员指定，取值可以是：
+
+* `vk::PrimitiveTopology::ePointList`：从顶点生成点
+* `vk::PrimitiveTopology::eLineList`：每两个顶点组成一条线段，顶点不复用
+* `vk::PrimitiveTopology::eLineStrip`：每条线段的终点顶点作为下一条线段的起点
+* `vk::PrimitiveTopology::eTriangleList`：每三个顶点组成一个三角形，顶点不复用
+* `vk::PrimitiveTopology::eTriangleStrip`：每个三角形的第二个和第三个顶点作为下一个三角形的前两个顶点
+
+通常，顶点按索引顺序从顶点缓冲区加载，但借助**元素缓冲区**（element buffer）你可以自己指定要用的索引。这样可以做复用顶点之类的优化。如果把 `primitiveRestartEnable` 成员设为 `vk::True`，就能在 `Strip` 拓扑模式下用一个特殊索引 `0xFFFF` 或 `0xFFFFFFFF` 来打断线段和三角形。
+
+本教程自始至终都要画三角形，所以结构体保持下面的数据：
+
+[,c++]
+----
+vk::PipelineInputAssemblyStateCreateInfo inputAssembly{.topology = vk::PrimitiveTopology::eTriangleList};
+----
+
+== 视口与裁剪
+
+视口（viewport）描述渲染输出会写入帧缓冲的哪个区域。它几乎总是从 `(0, 0)` 到 `(width, height)`，本教程也是如此。
+
+[,c++]
+----
+vk::Viewport viewport{0.0f, 0.0f, static_cast<float>(swapChainExtent.width), static_cast<float>(swapChainExtent.height), 0.0f, 1.0f};
+----
+
+记住，交换链及其图像的大小可能与窗口的 `WIDTH` 和 `HEIGHT` 不同。交换链图像之后会被用作帧缓冲，所以应当以它们的大小为准。
+
+`minDepth` 和 `maxDepth` 指定帧缓冲使用的深度值范围。这两个值必须落在 `[0.0f, 1.0f]` 内，但 `minDepth` 可以大于 `maxDepth`。如果没有特殊需求，沿用标准值 `0.0f` 和 `1.0f` 即可。
+
+视口定义从图像到帧缓冲的变换，而裁剪矩形（scissor rectangle）定义哪些区域的像素才会真正被存储。光栅化器会丢弃裁剪矩形之外的像素。裁剪矩形起的是过滤器而非变换的作用。下图展示了二者的差别。注意左侧裁剪矩形只是能得到该图像的众多可能之一，只要它比视口大即可。
+
+image::/images/viewports_scissors.png[]
+
+所以，若想绘制到整个帧缓冲，就应指定一个覆盖全部区域的裁剪矩形：
+
+[,c++]
+----
+vk::Rect2D scissor{vk::Offset2D{ 0, 0 }, swapChainExtent};
+----
+
+视口和裁剪矩形既可以作为管线的静态部分指定，也可以作为动态状态在命令缓冲区里设置。前者与其他状态的做法更一致，但把视口和裁剪状态设为动态往往更方便，因为灵活性大得多。这种做法很普遍，所有实现都能处理这种动态状态而不会带来性能损失。
+
+如果选择动态视口和裁剪矩形，就需要为管线启用相应的动态状态：
+
+[,c++]
+----
+std::vector<vk::DynamicState> dynamicStates = {vk::DynamicState::eViewport, vk::DynamicState::eScissor};
+
+vk::PipelineDynamicStateCreateInfo dynamicState{.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()), .pDynamicStates = dynamicStates.data()};
+----
+
+之后在创建管线时只需指定它们的数量：
+
+[,c++]
+----
+vk::PipelineViewportStateCreateInfo viewportState{.viewportCount = 1, .scissorCount = 1};
+----
+
+实际的视口和裁剪矩形稍后在绘制时设置。
+
+使用动态状态时，甚至可以在单个命令缓冲区里指定不同的视口和/或裁剪矩形。
+
+如果不使用动态状态，就得通过 `vk::PipelineViewportStateCreateInfo` 结构体在管线里设置视口和裁剪矩形。这会使得该管线的视口和裁剪矩形不可变，任何改动都需要用新值创建一条新管线。
+
+[,c++]
+----
+vk::PipelineViewportStateCreateInfo viewportState{.viewportCount = 1, .pViewports = &viewport, .scissorCount = 1, .pScissors = &scissor};
+----
+
+不管用哪种方式设置，某些显卡上都可以使用多个视口和裁剪矩形，因此结构体成员引用的是它们的数组。使用多个需要启用某项 GPU 特性（参见逻辑设备创建部分）。
+
+== 光栅化器
+
+光栅化器接收顶点着色器处理过的几何体，把它转换成片元，交由片元着色器着色。它还执行 https://en.wikipedia.org/wiki/Z-buffering[深度测试]、https://en.wikipedia.org/wiki/Back-face_culling[面剔除]和裁剪测试，并且可以配置成输出填充整个多边形的片元，或只输出边缘（线框渲染）。这些都通过 `vk::PipelineRasterizationStateCreateInfo` 结构体配置。
+
+[,c++]
+----
+vk::PipelineRasterizationStateCreateInfo rasterizer{.depthClampEnable        = vk::False,
+                                                    .rasterizerDiscardEnable = vk::False,
+                                                    .polygonMode             = vk::PolygonMode::eFill,
+                                                    .cullMode                = vk::CullModeFlagBits::eBack,
+                                                    .frontFace               = vk::FrontFace::eClockwise,
+                                                    .depthBiasEnable         = vk::False,
+                                                    .lineWidth               = 1.0f};
+----
+
+如果 `depthClampEnable` 设为 `vk::True`，超出近平面和远平面的片元会被钳制到这两个平面上，而不是被丢弃。这在阴影贴图等特殊场景中很有用。使用它需要启用某项 GPU 特性。
+
+如果 `rasterizerDiscardEnable` 设为 `vk::True`，几何体就永远不会经过光栅化阶段。这相当于禁用一切到帧缓冲的输出。
+
+`polygonMode` 决定如何为几何体生成片元。可用的模式有：
+
+* `vk::PolygonMode::eFill`：用片元填充多边形区域
+* `vk::PolygonMode::eLine`：多边形边缘绘制为线
+* `vk::PolygonMode::ePoint`：多边形顶点绘制为点
+
+使用除填充以外的任何模式都需要启用某项 GPU 特性。
+
+`cullMode` 变量决定使用哪种面剔除。可以关闭剔除、剔除正面、剔除背面，或者两者都剔除。
+
+`frontFace` 变量指定怎样的顶点顺序算作正面，可以是顺时针或逆时针。
+
+光栅化器可以通过加一个常量值，或根据片元斜率做偏移，来改变深度值。这有时用于阴影贴图，但本教程不会用到。把 `depthBiasEnable` 设为 `vk::False` 即可。
+
+`lineWidth` 成员很直接，它用片元数量描述线的粗细。支持的最大线宽取决于硬件，任何大于 `1.0f` 的线宽都需要启用 `wideLines` GPU 特性。
+
+== 多重采样
+
+`vk::PipelineMultisampleStateCreateInfo` 结构体配置多重采样，它是实现 https://en.wikipedia.org/wiki/Multisample_anti-aliasing[抗锯齿]的方式之一。其原理是把光栅化到同一个像素的多个多边形的片元着色器结果合并起来。这种情况主要出现在边缘处，而边缘也正是锯齿伪影最明显的地方。由于一个像素只被一个多边形覆盖时无需多次运行片元着色器，它比先以高分辨率渲染再降采样要便宜得多。启用它需要启用某项 GPU 特性。
+
+[,c++]
+----
+vk::PipelineMultisampleStateCreateInfo multisampling{.rasterizationSamples = vk::SampleCountFlagBits::e1, .sampleShadingEnable = vk::False};
+----
+
+多重采样会在后续章节再讲，现在先保持禁用。
+
+== 深度与模板测试
+
+如果你使用深度缓冲和/或模板缓冲，还需要用 `vk::PipelineDepthStencilStateCreateInfo` 配置深度测试与模板测试。我们现在还没有这类缓冲，所以可以直接传 `nullptr`，而不用指向这种结构体的指针。等讲到深度缓冲那一章再回来处理。
+
+== 颜色混合
+
+片元着色器返回颜色后，需要与帧缓冲中已有的颜色合并。这个变换称为颜色混合（color blending），有两种做法：
+
+* 混合旧值和新值，得到最终颜色
+* 用按位运算组合旧值和新值
+
+配置颜色混合有两类结构体。第一个结构体 `vk::PipelineColorBlendAttachmentState` 包含每个附件帧缓冲的配置，第二个结构体 `vk::PipelineColorBlendStateCreateInfo` 包含**全局**的颜色混合设置。本例中只有一个帧缓冲：
+
+[,c++]
+----
+vk::PipelineColorBlendAttachmentState colorBlendAttachment{
+    .blendEnable    = vk::False,	    
+    .colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG | vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA};
+----
+
+这个逐帧缓冲的结构体用来配置第一种颜色混合方式。具体执行的操作最好用下面的伪代码来说明：
+
+[,c++]
+----
+if (blendEnable) {
+    finalColor.rgb = (srcColorBlendFactor * newColor.rgb) <colorBlendOp> (dstColorBlendFactor * oldColor.rgb);
+    finalColor.a = (srcAlphaBlendFactor * newColor.a) <alphaBlendOp> (dstAlphaBlendFactor * oldColor.a);
+} else {
+    finalColor = newColor;
+}
+
+finalColor = finalColor & colorWriteMask;
+----
+
+如果 `blendEnable` 设为 `vk::False`，片元着色器产生的新颜色会原样通过。否则会执行两次混合运算，算出新颜色。结果颜色再与 `colorWriteMask` 做按位与，决定哪些通道真正通过。
+
+颜色混合最常见的用途是实现 alpha 混合：希望新颜色按其不透明度与旧颜色混合。此时 `finalColor` 应这样计算：
+
+[,c++]
+----
+finalColor.rgb = newAlpha * newColor + (1 - newAlpha) * oldColor;
+finalColor.a = newAlpha.a;
+----
+
+用下面的参数即可实现：
+
+[,c++]
+----
+vk::PipelineColorBlendAttachmentState colorBlendAttachment{
+    .blendEnable         = vk::True,
+    .srcColorBlendFactor = vk::BlendFactor::eSrcAlpha,
+    .dstColorBlendFactor = vk::BlendFactor::eOneMinusSrcAlpha,
+    .colorBlendOp        = vk::BlendOp::eAdd,
+    .srcAlphaBlendFactor = vk::BlendFactor::eOne,
+    .dstAlphaBlendFactor = vk::BlendFactor::eZero,
+    .alphaBlendOp        = vk::BlendOp::eAdd,
+    .colorWriteMask      = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG | vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA};
+----
+
+规范里的 `vk::BlendFactor` 和 `vk::BlendOp` 枚举列出了所有可能的运算。
+
+第二个结构体引用所有帧缓冲对应的结构体数组，并允许你设置混合常量，以便在上述计算中作为混合因子使用。
+
+[,c++]
+----
+vk::PipelineColorBlendStateCreateInfo colorBlending{
+    .logicOpEnable = vk::False, .logicOp = vk::LogicOp::eCopy, .attachmentCount = 1, .pAttachments = &colorBlendAttachment};
+----
+
+如果想用第二种混合方式（按位组合），就把 `logicOpEnable` 设为 `vk::True`，然后在 `logicOp` 字段指定按位运算。注意这会自动禁用第一种方式，效果等同于对每个附件帧缓冲都把 `blendEnable` 设为 `vk::False`！此模式下 `colorWriteMask` 同样用于决定帧缓冲中哪些通道会真正受影响。也可以像这里一样两种方式都禁用，此时片元颜色会原样写入帧缓冲。
+
+== 管线布局
+
+着色器中可以使用 `uniform` 值，它们是类似动态状态变量的全局量，可在绘制时修改，从而改变着色器行为而无需重新创建着色器。它们常用来把变换矩阵传给顶点着色器，或在片元着色器中创建纹理采样器。
+
+这些 uniform 值需要在创建管线时通过创建 `vk::PipelineLayout` 对象来指定。虽然要到后面章节才会用到，我们仍然必须创建一个空的管线布局。
+
+创建一个类成员来保存这个对象，因为之后其他函数会引用它：
+
+[,c++]
+----
+vk::raii::PipelineLayout pipelineLayout = nullptr;
+----
+
+然后在 `createGraphicsPipeline` 函数中创建该对象：
+
+[,c++]
+----
+vk::PipelineLayoutCreateInfo pipelineLayoutInfo{.setLayoutCount = 0, .pushConstantRangeCount = 0};
+
+pipelineLayout = vk::raii::PipelineLayout(device, pipelineLayoutInfo);
+----
+
+该结构体还指定**推送常量**（push constant），这是另一种向着色器传递动态值的方式，后续章节可能会讲到。
+
+== 小结
+
+固定功能状态就这些！从零开始把所有这些东西设置好要费不少功夫，但好处是我们现在几乎完全清楚图形管线里正在发生什么！这样就降低了遇到意外行为的概率，因为某些组件的默认状态未必符合你的预期。
+
+在 xref:./03_Dynamic_rendering.adoc[下一步]中，我们会设置动态渲染，告诉图形管线附件将如何被使用、用作什么。
+
+link:/attachments/10_fixed_functions.cpp[C{pp} 代码] /
+link:/attachments/09_shader_base.slang[Slang 着色器] /
+link:/attachments/09_shader_base.vert[GLSL 顶点着色器] /
+link:/attachments/09_shader_base.frag[GLSL 片元着色器]

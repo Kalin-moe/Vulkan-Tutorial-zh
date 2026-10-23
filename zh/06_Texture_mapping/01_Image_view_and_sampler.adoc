@@ -1,0 +1,345 @@
+:pp: {plus}{plus}
+
+= 图像视图与采样器
+
+本章要再创建两个资源，图形管线采样图像时要用到它们。
+第一个资源在处理交换链图像时已经见过，第二个则是新的——它关系到着色器如何从图像中读取纹素。
+
+== 纹理图像视图
+
+前面处理交换链图像和帧缓冲时已经看到，图像要通过图像视图访问，而不能直接访问。
+纹理图像同样需要创建这样的图像视图。
+
+新增一个类成员保存纹理图像的 `vk::raii::ImageView`，再新建 `createTextureImageView` 函数，在其中创建它：
+
+[,c++]
+----
+vk::raii::ImageView textureImageView = nullptr;
+
+...
+
+void initVulkan()
+{
+    ...
+    createTextureImage();
+    createTextureImageView();
+    createVertexBuffer();
+    ...
+}
+
+...
+
+void createTextureImageView()
+{
+}
+----
+
+这个函数的代码可以直接照搬 `createImageViews`。
+只需改动两处：`format` 和 `image`：
+
+[,c++]
+----
+vk::ImageViewCreateInfo viewInfo{
+    .image            = image,
+    .viewType         = vk::ImageViewType::e2D,
+    .format           = format,
+    .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1}};
+----
+
+这里省略了 `viewInfo.components` 的显式初始化，因为它本来就会默认初始化为 `vk::ComponentSwizzle::eIdentity`。
+调用 `vk::raii::ImageView` 构造函数完成图像视图的创建：
+
+[,c++]
+----
+textureImageView = vk::raii::ImageView(device, viewInfo);
+----
+
+由于大量逻辑与 `createImageViews` 重复，不妨把它抽象成新的 `createImageView` 函数：
+
+[,c++]
+----
+vk::raii::ImageView createImageView(vk::Image const &image, vk::Format format)
+{
+  vk::ImageViewCreateInfo viewInfo{
+      .image            = image,
+      .viewType         = vk::ImageViewType::e2D,
+      .format           = format,
+      .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1}};
+  return vk::raii::ImageView(device, viewInfo);
+}
+----
+
+现在 `createTextureImageView` 可以简化为：
+
+[,c++]
+----
+void createTextureImageView()
+{
+  textureImageView = createImageView(*textureImage, vk::Format::eR8G8B8A8Srgb);
+}
+----
+
+`createImageViews` 也可以简化为：
+
+[,c++]
+----
+void createImageViews()
+{
+  assert(swapChainImageViews.empty());
+
+  swapChainImageViews.reserve(swapChainImages.size());
+  for ( auto &image: swapChainImages )
+  {
+    swapChainImageViews.emplace_back(createImageView(image, swapChainSurfaceFormat.format));
+  }
+}
+----
+
+== 采样器
+
+着色器当然可以直接从图像读取纹素，但把图像当作纹理使用时，这种做法并不常见。
+纹理通常通过采样器访问，采样器会施加过滤和变换，算出最终取回的颜色。
+
+这些过滤器有助于处理过采样之类的问题。
+设想把纹理映射到几何体上，产生的片元比纹素还多。
+如果对每个片元只取离其纹理坐标最近的纹素，就会得到第一张图那样的结果：
+
+image::/images/texture_filtering.png[]
+
+如果对最近的 4 个纹素做线性插值，结果会像右图那样更平滑。
+当然，你的应用可能有更青睐左侧风格的美术需求（想想 Minecraft），但在常规图形应用中，右侧才是首选。
+从纹理读取颜色时，采样器对象会自动应用这种过滤。
+
+欠采样是相反的问题：纹素比片元多。
+以很斜的角度采样棋盘格这类高频图案时，就会因此产生伪影：
+
+image::/images/anisotropic_filtering.png[]
+
+如左图所示，远处的纹理会变得一片模糊。
+解决办法是 https://en.wikipedia.org/wiki/Anisotropic_filtering[各向异性过滤]，采样器同样可以自动应用它。
+
+除过滤之外，采样器还能处理变换。
+它通过**寻址模式**（addressing mode）决定：当你尝试读取图像之外的纹素时会发生什么。
+下图展示了其中几种可能：
+
+image::/images/texture_addressing.png[]
+
+接下来创建一个 `createTextureSampler` 函数来设置这样的采样器对象。
+稍后我们会用这个采样器在着色器里从纹理读取颜色。
+
+[,c++]
+----
+void initVulkan()
+{
+    ...
+    createTextureImage();
+    createTextureImageView();
+    createTextureSampler();
+    ...
+}
+
+...
+
+void createTextureSampler()
+{
+}
+----
+
+采样器通过 `vk::SamplerCreateInfo` 结构体配置，其中指定它要应用的所有过滤和变换。
+
+[,c++]
+----
+vk::SamplerCreateInfo samplerInfo{.magFilter = vk::Filter::eLinear, .minFilter = vk::Filter::eLinear};
+----
+
+`magFilter` 和 `minFilter` 字段指定放大或缩小时如何对纹素插值。
+放大对应上面说的过采样问题，缩小对应欠采样。
+可选值为 `vk::Filter::eNearest` 和 `vk::Filter::eLinear`，对应上面图中演示的两种模式。
+
+[,c++]
+----
+vk::SamplerCreateInfo samplerInfo{.magFilter    = vk::Filter::eLinear,
+                                  .minFilter    = vk::Filter::eLinear,
+                                  .mipmapMode   = vk::SamplerMipmapMode::eLinear,
+                                  .addressModeU = vk::SamplerAddressMode::eRepeat,
+                                  .addressModeV = vk::SamplerAddressMode::eRepeat,
+                                  .addressModeW = vk::SamplerAddressMode::eRepeat};
+----
+
+寻址模式可以用 `addressMode` 系列字段按轴分别指定。
+可用取值如下。
+其中大多在上面的图中演示过。
+注意坐标轴称为 U、V、W，而不是 X、Y、Z。
+这是纹理空间坐标的惯例。
+
+* `vk::SamplerAddressMode::eRepeat`：超出图像尺寸时重复纹理。
+* `vk::SamplerAddressMode::eMirroredRepeat`：类似重复，但超出尺寸时反转坐标以镜像图像。
+* `vk::SamplerAddressMode::eClampToEdge`：超出图像尺寸时，取离该坐标最近的边缘颜色。
+* `vk::SamplerAddressMode::eMirrorClampToEdge`：类似钳制到边缘，但改用与最近边缘相对的边缘。
+* `vk::SamplerAddressMode::eClampToBorder`：在图像尺寸之外采样时返回纯色。
+
+这里用哪种寻址模式其实都无所谓，因为本教程不会在图像之外采样。
+不过重复模式大概是最常见的，因为它可以用来平铺地板、墙壁之类的纹理。
+
+[,c++]
+----
+vk::PhysicalDeviceProperties properties = physicalDevice.getProperties();
+vk::SamplerCreateInfo        samplerInfo{.magFilter        = vk::Filter::eLinear,
+                                         .minFilter        = vk::Filter::eLinear,
+                                         .mipmapMode       = vk::SamplerMipmapMode::eLinear,
+                                         .addressModeU     = vk::SamplerAddressMode::eRepeat,
+                                         .addressModeV     = vk::SamplerAddressMode::eRepeat,
+                                         .addressModeW     = vk::SamplerAddressMode::eRepeat,
+                                         .anisotropyEnable = vk::True,
+                                         .maxAnisotropy    = properties.limits.maxSamplerAnisotropy};
+----
+
+`anisotropyEnable` 字段指定是否使用各向异性过滤。
+除非在意性能，否则没有理由不开。
+`maxAnisotropy` 字段限制计算最终颜色时可用的纹素采样数。
+取值越低性能越好，但质量也越低。
+要确定能用多大的值，需要像这样获取物理设备的属性：
+
+[,c++]
+----
+vk::PhysicalDeviceProperties properties = physicalDevice.getProperties();
+----
+
+查看 `vk::PhysicalDeviceProperties` 结构体的文档会发现，它包含一个名为 `limits` 的 `vk::PhysicalDeviceLimits` 成员。
+这个结构体又有一个 `maxSamplerAnisotropy` 成员，它就是 `maxAnisotropy` 能指定的最大值。
+如果想要最高质量，直接用这个值即可。
+你可以在程序开始时查询属性并传给需要的函数，也可以在 `createTextureSampler` 函数里直接查询。
+
+[,c++]
+----
+vk::PhysicalDeviceProperties properties = physicalDevice.getProperties();
+vk::SamplerCreateInfo        samplerInfo{.magFilter        = vk::Filter::eLinear,
+                                         .minFilter        = vk::Filter::eLinear,
+                                         .mipmapMode       = vk::SamplerMipmapMode::eLinear,
+                                         .addressModeU     = vk::SamplerAddressMode::eRepeat,
+                                         .addressModeV     = vk::SamplerAddressMode::eRepeat,
+                                         .addressModeW     = vk::SamplerAddressMode::eRepeat,
+                                         .anisotropyEnable = vk::True,
+                                         .maxAnisotropy    = properties.limits.maxSamplerAnisotropy,
+                                         .compareEnable    = vk::False,
+                                         .compareOp        = vk::CompareOp::eAlways};
+----
+
+[,c++]
+----
+samplerInfo.borderColor = vk::BorderColor::eIntOpaqueBlack;
+----
+
+`borderColor` 字段指定使用钳制到边框寻址模式、在图像之外采样时返回哪种颜色。
+可以返回黑色、白色或透明色，格式可以是浮点或整数。
+但不能指定任意颜色。
+
+[,c++]
+----
+samplerInfo.unnormalizedCoordinates = vk::False;
+----
+
+`unnormalizedCoordinates` 字段指定用哪种坐标系来定位图像中的纹素。
+如果该字段为 `vk::True`，就可以直接使用 `[0, texWidth)` 和 `[0, texHeight)` 范围内的坐标。
+如果为 `vk::False`，所有轴上都用 `[0, 1)` 范围来定位纹素。
+实际应用几乎总是使用归一化坐标，因为这样就能用完全相同的坐标去使用不同分辨率的纹理。
+
+[,c++]
+----
+samplerInfo.compareEnable = vk::False;
+samplerInfo.compareOp = vk::CompareOp::eAlways;
+----
+
+如果启用了比较函数，纹素会先与某个值比较，比较结果再参与过滤运算。
+这主要用于阴影贴图上的 https://developer.nvidia.com/gpugems/GPUGems/gpugems_ch11.html[百分比靠近过滤]（percentage-closer filtering）。
+后续章节会讲到。
+
+[,c++]
+----
+samplerInfo.mipmapMode = vk::SamplerMipmapMode::eLinear;
+samplerInfo.mipLodBias = 0.0f;
+samplerInfo.minLod = 0.0f;
+samplerInfo.maxLod = 0.0f;
+----
+
+这些字段都与 mipmap 有关。
+mipmap 会在 xref:../09_Generating_Mipmaps.adoc[后面的章节]中讲解，简单说它是另一种可以施加的过滤。
+
+采样器的行为到此就完整定义了。
+新增一个类成员保存采样器对象的句柄，并用 `vkCreateSampler` 创建采样器：
+
+[,c++]
+----
+vk::raii::ImageView    textureImageView   = nullptr;
+vk::raii::Sampler      textureSampler     = nullptr;
+
+...
+
+void createTextureSampler()
+{
+    ...
+
+    textureSampler = vk::raii::Sampler(device, samplerInfo);
+}
+----
+
+注意，采样器在任何地方都没有引用 `vk::Image`。
+采样器是一个独立对象，提供从纹理中提取颜色的接口。
+它可以应用到任何图像上，无论是一维、二维还是三维。
+这与许多旧 API 不同，后者把纹理图像和过滤合并成单一状态。
+
+== 各向异性设备特性
+
+如果现在运行程序，会看到类似这样的验证层消息：
+
+image::/images/validation_layer_anisotropy.png[]
+
+这是因为各向异性过滤实际上是一项可选的设备特性。
+需要修改 `createLogicalDevice` 函数来请求它：
+
+[,c++]
+----
+vk::StructureChain<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan13Features, vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT> featureChain = {
+    {.features = {.samplerAnisotropy = true } },            // vk::PhysicalDeviceFeatures2
+    {.synchronization2 = true, .dynamicRendering = true },  // vk::PhysicalDeviceVulkan13Features
+    {.extendedDynamicState = true }                         // vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT
+};
+----
+
+尽管现代显卡几乎不可能不支持它，我们还是应该更新 `isDeviceSuitable`，检查该特性是否可用：
+
+[,c++]
+----
+bool isDeviceSuitable(VkPhysicalDevice device)
+{
+    ...
+
+		auto features                 = physicalDevice.template getFeatures2<vk::PhysicalDeviceFeatures2,
+		                                                                     vk::PhysicalDeviceVulkan13Features,
+		                                                                     vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>();
+		bool supportsRequiredFeatures = features.template get<vk::PhysicalDeviceFeatures2>().features.samplerAnisotropy &&
+		                                features.template get<vk::PhysicalDeviceVulkan13Features>().dynamicRendering &&
+		                                features.template get<vk::PhysicalDeviceVulkan13Features>().synchronization2 &&
+		                                features.template get<vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>().extendedDynamicState;
+
+		// Return true if the physicalDevice meets all the criteria
+		return supportsVulkan1_3 && supportsGraphics && supportsAllRequiredExtensions && supportsRequiredFeatures;
+}
+----
+
+`vk::raii::PhysicalDevice::getFeatures2` 复用了 `vk::PhysicalDeviceFeatures` 结构体，通过设置其中的布尔值来表示哪些特性受支持，而不是请求哪些特性。
+
+除了强制要求各向异性过滤可用，也可以干脆按条件关掉它：
+
+[,c++]
+----
+samplerInfo.anisotropyEnable = vk::False;
+samplerInfo.maxAnisotropy = 1.0f;
+----
+
+在 xref:./02_Combined_image_sampler.adoc[下一章]中，我们会把图像和采样器对象暴露给着色器，把纹理绘制到正方形上。
+
+link:/attachments/25_sampler.cpp[C{pp} 代码] /
+link:/attachments/22_shader_ubo.slang[Slang 着色器] /
+link:/attachments/22_shader_ubo.vert[GLSL 顶点着色器] /
+link:/attachments/22_shader_ubo.frag[GLSL 片元着色器]

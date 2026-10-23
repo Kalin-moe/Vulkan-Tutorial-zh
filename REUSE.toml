@@ -179,3 +179,32 @@ path = [
 precedence = "closest"
 SPDX-FileCopyrightText = "The Khronos Group, Inc."
 SPDX-License-Identifier = "CC-BY-4.0"
+
+# 站点生成器：由 Kalin 编写，MIT 许可（完整文本见 LICENSE-MIT / LICENSES/MIT.txt）。
+[[annotations]]
+path = [
+    "build-site.js",
+    "site/**",
+    "config/**",
+    "js/**",
+    "README.md",
+    "package.json",
+    "pnpm-lock.yaml",
+    "favicon.svg",
+]
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Kalin"
+SPDX-License-Identifier = "MIT"
+
+# 中文译文：与英文原文同源，沿用原教程的 CC BY-SA 4.0。
+[[annotations]]
+path = [
+    "zh/**",
+]
+precedence = "closest"
+SPDX-FileCopyrightText = [
+    "2023 Alexander Overvoorde",
+    "2023-2026 The Khronos Group, Inc.",
+]
+SPDX-License-Identifier = "CC-BY-SA-4.0"
+

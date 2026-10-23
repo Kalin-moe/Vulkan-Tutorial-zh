@@ -1,0 +1,164 @@
+:pp: {plus}{plus}
+
+= 暂存缓冲区
+
+== 简介
+
+我们现在的顶点缓冲区能正常工作，但允许 CPU 访问的那种内存类型，对显卡本身读取来说未必是最优的。最优的内存带有 `vk::MemoryPropertyFlagBits::eDeviceLocal` 标志，在独立显卡上通常无法被 CPU 访问。本章我们要创建两个顶点缓冲区：一个位于 CPU 可访问内存中的 _暂存缓冲区_，用来把顶点数组的数据上传进去；另一个是最终放在设备本地内存中的顶点缓冲区。然后我们会用缓冲区拷贝命令，把数据从暂存缓冲区搬到真正的顶点缓冲区。
+
+== 传输队列
+
+缓冲区拷贝命令需要支持传输操作的队列族，这类队列族用 `vk::QueueFlagBits::eTransfer` 表示。好消息是，任何具备 `vk::QueueFlagBits::eGraphics` 或 `vk::QueueFlagBits::eCompute` 能力的队列族，都已经隐式支持 `vk::QueueFlagBits::eTransfer` 操作。在这些情况下，实现不需要在 `queueFlags` 中显式列出该标志。
+
+如果你喜欢挑战，也可以尝试专门用一个不同的队列族来做传输操作。这需要对程序做以下修改：
+
+* 除了 `uint32_t queueIndex`（现在也许该改名为 `graphicsQueueIndex`）之外，再引入一个 `uint32_t transferQueueIndex`，并显式寻找带有 `vk::QueueFlagBits::eTransfer` 位、但没有 `vk::QueueFlagBits::eGraphics` 位的队列族。
+* 修改 `createLogicalDevice`，请求一个 `vk::raii::Queue transferQueue` 句柄（也许顺便把 `queue` 改名为 `graphicsQueue`）
+* 为提交到传输队列族的命令缓冲区再创建一个命令池
+* 把资源的 `sharingMode` 改为 `vk::SharingMode::eConcurrent`，并同时指定图形和传输两个队列族
+* 把 `vk::raii::CommandBuffer::copyBuffer`（本章会用到）之类的传输命令提交到传输队列，而不是图形队列
+
+这要多花点功夫，但能让你深入理解资源如何在队列族之间共享。
+
+== 抽象缓冲区创建
+
+本章要创建多个缓冲区，所以最好把缓冲区创建移到辅助函数里。新建 `createBuffer` 函数，把 `createVertexBuffer` 中的代码（映射部分除外）移进去。
+
+[,c++]
+----
+std::pair<vk::raii::Buffer, vk::raii::DeviceMemory> createBuffer(vk::DeviceSize size, vk::BufferUsageFlags usage, vk::MemoryPropertyFlags properties)
+{
+  vk::BufferCreateInfo   bufferInfo{.size = size, .usage = usage, .sharingMode = vk::SharingMode::eExclusive};
+  vk::raii::Buffer       buffer          = vk::raii::Buffer(device, bufferInfo);
+  vk::MemoryRequirements memRequirements = buffer.getMemoryRequirements();
+  vk::MemoryAllocateInfo allocInfo{.allocationSize = memRequirements.size, .memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties)};
+  vk::raii::DeviceMemory bufferMemory = vk::raii::DeviceMemory(device, allocInfo);
+  buffer.bindMemory(*bufferMemory, 0);
+  return {std::move(buffer), std::move(bufferMemory)};
+}
+----
+
+务必加上缓冲区大小、内存属性和用途这几个参数，这样这个函数就能用来创建多种不同类型的缓冲区。函数以 `std::pair` 的形式同时返回生成的缓冲区和绑定到它的设备内存。由于 `vk::raii` 句柄不可拷贝，必须把它们移出函数。
+
+现在可以从 `createVertexBuffer` 中删掉缓冲区创建和内存分配的代码，改为直接调用 `createBuffer`：
+
+[,c++]
+----
+void createVertexBuffer()
+{
+  vk::DeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
+
+  auto [stagingBuffer, stagingBufferMemory] =
+      createBuffer(bufferSize, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+
+  void *dataStaging = stagingBufferMemory.mapMemory(0, bufferSize);
+  memcpy(dataStaging, vertices.data(), bufferSize);
+  stagingBufferMemory.unmapMemory();
+}
+----
+
+== 使用暂存缓冲区
+
+接下来修改 `createVertexBuffer`，只把主机可见的缓冲区当作临时缓冲区，并用设备本地内存的缓冲区作为真正的顶点缓冲区。
+
+[,c++]
+----
+void createVertexBuffer()
+{
+  vk::DeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
+
+  auto [stagingBuffer, stagingBufferMemory] =
+      createBuffer(bufferSize, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+
+  void *dataStaging = stagingBufferMemory.mapMemory(0, bufferSize);
+  memcpy(dataStaging, vertices.data(), bufferSize);
+  stagingBufferMemory.unmapMemory();
+
+  std::tie(vertexBuffer, vertexBufferMemory) =
+      createBuffer(bufferSize, vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst, vk::MemoryPropertyFlagBits::eDeviceLocal);
+
+  copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
+}
+----
+
+现在我们用新的 `stagingBuffer` 和 `stagingBufferMemory` 来映射并拷贝顶点数据。本章会用到两个新的缓冲区用途标志：
+
+* `vk::BufferUsageFlagBits::eTransferSrc`：缓冲区可作为内存传输操作的源。
+* `vk::BufferUsageFlagBits::eTransferDst`：缓冲区可作为内存传输操作的目标。
+
+`vertexBuffer` 现在从设备本地内存类型分配，这通常意味着我们无法使用 `vk::raii::DeviceMemory::mapMemory`。不过，我们可以把数据从 `stagingBuffer` 拷贝到 `vertexBuffer`。为此需要给 `stagingBuffer` 指定传输源标志、给 `vertexBuffer` 指定传输目标标志，同时保留顶点缓冲区用途标志。
+
+接下来写一个把内容从一个缓冲区拷贝到另一个缓冲区的函数，名为 `copyBuffer`。
+
+[,c++]
+----
+void copyBuffer(vk::raii::Buffer & srcBuffer, vk::raii::Buffer & dstBuffer, vk::DeviceSize size)
+{
+}
+----
+
+内存传输操作和绘制命令一样，都是通过命令缓冲区执行的。因此必须先分配一个临时命令缓冲区。你也许想为这类短命缓冲区单独创建一个命令池，因为实现可能借此进行内存分配优化。这种情况下，创建命令池时应使用 `vk::CommandPoolCreateFlagBits::eTransient` 标志。
+
+[,c++]
+----
+void copyBuffer(vk::raii::Buffer & srcBuffer, vk::raii::Buffer & dstBuffer, vk::DeviceSize size)
+{
+  vk::CommandBufferAllocateInfo allocInfo{ .commandPool = commandPool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 1 };
+  vk::raii::CommandBuffer commandCopyBuffer = std::move(device.allocateCommandBuffers(allocInfo).front());
+}
+----
+
+然后立即开始记录命令缓冲区：
+
+[,c++]
+----
+commandCopyBuffer.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+----
+
+这个命令缓冲区只会用一次，函数也要等拷贝操作执行完毕才返回。用 `vk::CommandBufferUsageFlagBits::eOneTimeSubmit` 把这一意图告诉驱动是好习惯。
+
+[,c++]
+----
+commandCopyBuffer.copyBuffer(*srcBuffer, *dstBuffer, vk::BufferCopy(0, 0, size));
+----
+
+缓冲区内容通过 `vk::raii::CommandBuffer::copyBuffer` 命令传输。它接受源缓冲区、目标缓冲区以及要拷贝的区域数组。区域由 `vk::BufferCopy` 结构定义，包含源缓冲区偏移、目标缓冲区偏移和大小。与 `vk::raii::DeviceMemory::mapMemory` 命令不同，这里不能指定 `vk::WholeSize`。
+
+[,c++]
+----
+commandCopyBuffer.end();
+----
+
+这个命令缓冲区只包含拷贝命令，所以记录到这里就可以结束。现在执行命令缓冲区，完成传输：
+
+[,c++]
+----
+queue.submit(vk::SubmitInfo{.commandBufferCount = 1, .pCommandBuffers = &*commandCopyBuffer}, nullptr);
+queue.waitIdle();
+----
+
+与绘制命令不同，这次没有需要等待的事件。我们只想立刻在缓冲区上执行传输。等待传输完成同样有两种方式：可以用栅栏并配合 `vk::raii::Device::waitForFences` 等待，也可以简单地用 `vk::raii::Queue::waitIdle` 等传输队列空闲。使用栅栏可以让你同时安排多次传输，并等待它们全部完成，而不是一次只执行一个。这也许能给驱动更多优化机会。
+
+现在可以在 `createVertexBuffer` 中调用 `copyBuffer`，把顶点数据搬到设备本地缓冲区：
+
+[,c++]
+----
+copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
+----
+
+把数据从暂存缓冲区拷贝到设备缓冲区之后，RAII 缓冲区对象会自行清理并释放内存。
+
+运行程序，确认又能看到熟悉的三角形。改进现在可能还看不出来，但顶点数据已经是从高性能内存加载的。等我们开始渲染更复杂的几何体时，这一点就会体现出来。
+
+== 结语
+
+需要注意，在真实应用中，不应该为每个缓冲区都调用一次 `vk::raii::Device::allocateMemory`。同时存在的内存分配次数上限受物理设备的 `maxMemoryAllocationCount` 限制，即使是 NVIDIA GTX 1080 这样的高端硬件，这个值也可能低到 `4096`。要同时为大量对象分配内存，正确做法是编写自定义分配器，利用我们在许多函数中见过的 `offset` 参数，把一次分配切分给多个不同对象。
+
+这样的分配器可以自己实现，也可以使用 GPUOpen 计划提供的 https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator[VulkanMemoryAllocator] 库。不过对本教程来说，为每个资源单独分配是没问题的，因为目前我们还远不会触及这些上限。
+
+xref:./03_Index_buffer.adoc[下一章]会介绍用索引缓冲区复用顶点。
+
+link:/attachments/20_staging_buffer.cpp[C{pp} 代码] /
+link:/attachments/19_shader_vertexbuffer.slang[Slang 着色器] /
+link:/attachments/19_shader_vertexbuffer.vert[GLSL 顶点着色器] /
+link:/attachments/19_shader_vertexbuffer.frag[GLSL 片元着色器]

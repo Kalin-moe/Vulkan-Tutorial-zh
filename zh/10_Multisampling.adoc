@@ -1,0 +1,348 @@
+:pp: {plus}{plus}
+
+= 多重采样
+
+== 引言
+
+我们的程序现在可以为纹理加载多个细节级别，修正渲染远离观察者的物体时出现的伪影。
+图像现在平滑了许多；不过仔细看会发现，绘制出的几何图形边缘有锯齿状的图案。
+在早期某个渲染四边形的程序里，这一点尤其明显：
+
+image::/images/texcoord_visualization.png[]
+
+这种不想要的效果称为“锯齿”（aliasing），它源于可用于渲染的像素数量有限。
+既然不存在分辨率无限的显示器，它在某种程度上总会存在。
+解决这个问题有若干办法，本章重点讲其中比较流行的一种：https://en.wikipedia.org/wiki/Multisample_anti-aliasing[多重采样抗锯齿]（MSAA）。
+
+在普通渲染中，像素颜色由单个采样点决定，多数情况下这个点就是屏幕上目标像素的中心。
+如果绘制出的线条有一部分穿过某个像素，却没有覆盖采样点，该像素就会留空，从而产生锯齿状的“阶梯”效果。
+
+image::/images/aliasing.png[]
+
+MSAA 的做法是每个像素使用多个采样点（名称也由此而来）来确定最终颜色。
+可以想见，采样点越多效果越好，但计算开销也越大。
+
+image::/images/antialiasing.png[]
+
+在我们的实现中，会尽量使用可用的最大采样数。
+具体到你的应用，这未必总是最佳做法；如果最终结果满足质量要求，为了更高性能而少用一些采样点可能更合适。
+
+== 获取可用的采样数
+
+先从确定硬件能使用多少采样点开始。
+大多数现代 GPU 至少支持 8 个采样点，但这个数字并非处处相同。
+我们新增一个类成员来记录它：
+
+[,c++]
+----
+...
+vk::SampleCountFlagBits msaaSamples = vk::SampleCountFlagBits::e1;
+...
+----
+
+默认情况下每个像素只用一个采样点，等同于不做多重采样，此时最终图像保持不变。
+准确的最大采样数可以从所选物理设备对应的 `vk::PhysicalDeviceProperties` 中取得。
+我们同时使用深度缓冲区，因此必须同时考虑颜色和深度的采样数。
+两者共同支持的最高采样数，就是我们可以支持的上限。
+添加一个函数来获取这些信息：
+
+[,c++]
+----
+vk::SampleCountFlagBits getMaxUsableSampleCount()
+{
+  vk::PhysicalDeviceProperties physicalDeviceProperties = physicalDevice->getProperties();
+
+  vk::SampleCountFlags counts = physicalDeviceProperties.limits.framebufferColorSampleCounts & physicalDeviceProperties.limits.framebufferDepthSampleCounts;
+  if (counts & vk::SampleCountFlagBits::e64) { return vk::SampleCountFlagBits::e64; }
+  if (counts & vk::SampleCountFlagBits::e32) { return vk::SampleCountFlagBits::e32; }
+  if (counts & vk::SampleCountFlagBits::e16) { return vk::SampleCountFlagBits::e16; }
+  if (counts & vk::SampleCountFlagBits::e8) { return vk::SampleCountFlagBits::e8; }
+  if (counts & vk::SampleCountFlagBits::e4) { return vk::SampleCountFlagBits::e4; }
+  if (counts & vk::SampleCountFlagBits::e2) { return vk::SampleCountFlagBits::e2; }
+
+  return vk::SampleCountFlagBits::e1;
+}
+----
+
+接下来在物理设备选择过程中用这个函数设置 `msaaSamples` 变量。
+为此对 `pickPhysicalDevice` 函数稍作扩展：
+
+[,c++]
+----
+void pickPhysicalDevice()
+{
+  ...
+  physicalDevice = *devIter;
+  msaaSamples    = getMaxUsableSampleCount();
+  ...
+}
+----
+
+== 设置渲染目标
+
+在 MSAA 中，每个像素先在一个离屏缓冲区里采样，然后再渲染到屏幕。
+这个新缓冲区与一直以来渲染到的普通图像略有不同：它必须能每个像素存储多个采样点。
+多重采样缓冲区创建后，必须解析（resolve）到默认帧缓冲（每个像素只存一个采样点）。
+因此我们需要额外创建一个渲染目标，并修改当前的绘制流程。
+由于同一时间只有一个绘制操作在进行，我们只需要一个渲染目标，深度缓冲区也是同理。
+添加以下类成员：
+
+[,c++]
+----
+...
+vk::raii::Image        colorImage       = nullptr;
+vk::raii::DeviceMemory colorImageMemory = nullptr;
+vk::raii::ImageView    colorImageView   = nullptr;
+...
+----
+
+这个新图像需要按每个像素存储所需的采样数，因此在创建图像时要把它传给 `vk::ImageCreateInfo`。
+修改 `createImage` 函数，增加 `numSamples` 参数：
+
+[,c++]
+----
+std::pair<vk::raii::Image, vk::raii::DeviceMemory>
+    createImage(uint32_t                width,
+                uint32_t                height,
+                uint32_t                mipLevels,
+                vk::SampleCountFlagBits numSamples,
+                vk::Format              format,
+                vk::ImageTiling         tiling,
+                vk::ImageUsageFlags     usage,
+                vk::MemoryPropertyFlags properties)
+{
+  vk::ImageCreateInfo imageInfo{.imageType     = vk::ImageType::e2D,
+                                .format        = format,
+                                .extent        = {width, height, 1},
+                                .mipLevels     = mipLevels,
+                                .arrayLayers   = 1,
+                                .samples       = numSamples,
+                                .tiling        = tiling,
+                                .usage         = usage,
+                                .sharingMode   = vk::SharingMode::eExclusive,
+                                .initialLayout = vk::ImageLayout::eUndefined};
+    ...
+----
+
+现在先把该函数的所有调用改成使用 `vk::SampleCountFlagBits::e1`，随着实现推进，我们会把它替换成合适的值：
+
+[,c++]
+----
+std::tie(depthImage, depthImageMemory) = createImage(swapChainExtent.width,
+                                                     swapChainExtent.height,
+                                                     1,
+                                                     vk::SampleCountFlagBits::e1,
+                                                     depthFormat,
+                                                     vk::ImageTiling::eOptimal,
+                                                     vk::ImageUsageFlagBits::eDepthStencilAttachment,
+                                                     vk::MemoryPropertyFlagBits::eDeviceLocal);
+...
+std::tie(textureImage, textureImageMemory) =
+    createImage(texWidth,
+                texHeight,
+                mipLevels,
+                vk::SampleCountFlagBits::e1,
+                vk::Format::eR8G8B8A8Srgb,
+                vk::ImageTiling::eOptimal,
+                vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+                vk::MemoryPropertyFlagBits::eDeviceLocal);
+----
+
+现在来创建多重采样颜色缓冲区。
+添加 `createColorResources` 函数，注意这里把 `msaaSamples` 作为 `createImage` 的参数传入。
+这里也只使用一个 mip 级别，因为对于每个像素采样数大于 1 的图像，Vulkan 规范强制要求如此。
+另外，这个颜色缓冲区不会用作纹理，所以不需要 mipmap：
+
+[,c++]
+----
+void createColorResources()
+{
+  vk::Format colorFormat = swapChainSurfaceFormat.format;
+
+  std::tie(colorImage, colorImageMemory) = createImage(swapChainExtent.width,
+                                                       swapChainExtent.height,
+                                                       1,
+                                                       msaaSamples,
+                                                       colorFormat,
+                                                       vk::ImageTiling::eOptimal,
+                                                       vk::ImageUsageFlagBits::eTransientAttachment | vk::ImageUsageFlagBits::eColorAttachment,
+                                                       vk::MemoryPropertyFlagBits::eDeviceLocal);
+  colorImageView                         = createImageView(colorImage, colorFormat, vk::ImageAspectFlagBits::eColor, 1);
+}
+----
+
+为保持一致，在 `createDepthResources` 之前调用该函数：
+
+[,c++]
+----
+void initVulkan()
+{
+  ...
+  createColorResources();
+  createDepthResources();
+  ...
+}
+----
+
+多重采样颜色缓冲区就位后，接下来处理深度。
+修改 `createDepthResources`，更新深度缓冲区使用的采样数：
+
+[,c++]
+----
+void createDepthResources()
+{
+  ...
+  std::tie(depthImage, depthImageMemory) = createImage(swapChainExtent.width,
+                                                       swapChainExtent.height,
+                                                       1,
+                                                       msaaSamples,
+                                                       depthFormat,
+                                                       vk::ImageTiling::eOptimal,
+                                                       vk::ImageUsageFlagBits::eDepthStencilAttachment,
+                                                       vk::MemoryPropertyFlagBits::eDeviceLocal);
+  ...
+}
+----
+
+再更新 `recreateSwapChain`，以便窗口大小改变时能按正确分辨率重建新的颜色图像：
+
+[,c++]
+----
+void recreateSwapChain()
+{
+  ...
+  createImageViews();
+  createColorResources();
+  createDepthResources();
+  ...
+}
+----
+
+MSAA 的初始设置已经完成，现在要在图形管线里真正用上这个新资源，看看效果！
+
+== 使用新附件
+
+首先修改 `createGraphicsPipeline`，让图形管线使用多于一个采样点：
+
+[,c++]
+----
+void createGraphicsPipeline()
+{
+  ...
+  vk::PipelineMultisampleStateCreateInfo multisampling{.rasterizationSamples = msaaSamples};
+  ...
+}
+----
+
+然后扩展 `recordCommandBuffer`。
+除了把 `swapChainImages[imageIndex]` 和 `depthImage` 分别从 `vk::ImageLayout::eUndefined` 转换到
+`vk::ImageLayout::eColorAttachmentOptimal` 与 `vk::ImageLayout::eDepthAttachmentOptimal`，还要把新的多重采样
+`colorImage` 从 `vk::ImageLayout::eUndefined` 转换到 `vk::ImageLayout::eColorAttachmentOptimal`：
+
+[,c++]
+----
+void recordCommandBuffer(uint32_t imageIndex)
+{
+  ...
+  // 将多重采样颜色图像转换到 vk::ImageLayout::eColorAttachmentOptimal
+  transition_image_layout(
+      *colorImage,
+      vk::ImageLayout::eUndefined,
+      vk::ImageLayout::eColorAttachmentOptimal,
+      vk::AccessFlagBits2::eColorAttachmentWrite,
+      vk::AccessFlagBits2::eColorAttachmentWrite,
+      vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+      vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+      vk::ImageAspectFlagBits::eColor);
+  ...
+}
+----
+
+接下来，在使用 `vk::CommandBuffer::beginRendering` 的 `vk::RenderingInfo` 中，不再把
+`swapChainImageViews[imageIndex]` 当作颜色附件，而是使用 `colorImageView`，并把
+`swapChainImageViews[imageIndex]` 作为解析图像视图，解析模式为 `vk::ResolveModeFlagBits::eAverage`：
+
+[,c++]
+----
+void recordCommandBuffer(uint32_t imageIndex)
+{
+  ...
+  // 颜色附件（多重采样），带解析附件
+  vk::RenderingAttachmentInfo colorAttachment = {
+      .imageView          = colorImageView,
+      .imageLayout        = vk::ImageLayout::eColorAttachmentOptimal,
+      .resolveMode        = vk::ResolveModeFlagBits::eAverage,
+      .resolveImageView   = swapChainImageViews[imageIndex],
+      .resolveImageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+      .loadOp             = vk::AttachmentLoadOp::eClear,
+      .storeOp            = vk::AttachmentStoreOp::eStore,
+      .clearValue         = clearColor};
+  ...
+}
+----
+
+现在运行程序，应该会看到：
+
+image::/images/multisampling.png[]
+
+和 mipmap 一样，差别不会一眼就看出来。
+仔细看会发现边缘不再那么锯齿化，整幅图像比原来平滑了一些。
+
+image::/images/multisampling_comparison.png[]
+
+凑近观察某条边缘时，差别更明显：
+
+image::/images/multisampling_comparison2.png[]
+
+== 质量改进
+
+当前 MSAA 实现存在一些限制，在细节较多的场景中可能影响输出图像的质量。
+例如，我们目前没有解决着色器锯齿（shader aliasing）可能带来的问题，也就是说，
+MSAA 只让几何体边缘变平滑，并不处理内部填充。
+这可能造成一种情况：屏幕上渲染出的多边形边缘很平滑，但如果贴上的纹理包含高对比度颜色，纹理看起来仍有锯齿。
+解决这个问题的一种方式是启用 https://docs.vulkan.org/spec/latest/chapters/vertexpostproc.html#primsrast-sampleshading[采样着色]（sample shading），它能进一步提升图像质量，但会带来额外的性能开销：
+
+[,c++]
+----
+void createLogicalDevice()
+{
+  ...
+  vk::StructureChain<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan13Features, vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT> featureChain = {
+      {.features = {.sampleRateShading = vk::True, .samplerAnisotropy = vk::True}},        // vk::PhysicalDeviceFeatures2
+  ...
+}
+
+void createGraphicsPipeline()
+{
+  ...
+  vk::PipelineMultisampleStateCreateInfo multisampling{
+      .rasterizationSamples = msaaSamples,
+      .sampleShadingEnable  = vk::True,        // 在管线中启用采样着色
+      .minSampleShading     = 0.2f             // 采样着色的最小比例；越接近 1 越平滑
+  };
+  ...
+}
+----
+
+本示例中我们让采样着色保持禁用，但在某些场景下画质提升会很明显：
+
+image::/images/sample_shading.png[]
+
+== 后续步骤
+
+走到这一步花了不少功夫，但现在你终于有了一个不错的 Vulkan 程序基础。
+不过这还不是教程系列的终点——你现在掌握的 Vulkan 基本原理，已经足够开始探索更多特性，例如：
+
+* 推送常量与实例化渲染，见 xref:16_Multiple_Objects.adoc[渲染多个物体]
+* xref:17_Multithreading.adoc[多线程生成命令缓冲区]
+* xref:11_Compute_Shader.adoc[计算着色器]
+* 动态 uniform、图像与采样器分离的描述符、管线缓存，以及多个子通道——本系列没有涉及，
+  但 Khronos 维护的 https://github.com/KhronosGroup/Vulkan-Samples[Vulkan-Samples] 仓库中有演示
+
+当前程序可以朝很多方向扩展，比如加入 Blinn-Phong 光照、后处理效果和阴影贴图。
+你应该能从其他 API 的教程里学会这些效果的工作原理，因为尽管 Vulkan 更加显式，许多概念的工作方式仍然相同。
+
+link:/attachments/30_multisampling.cpp[C{pp} 代码] /
+link:/attachments/27_shader_depth.slang[Slang 着色器] /
+link:/attachments/27_shader_depth.vert[GLSL 顶点着色器] /
+link:/attachments/27_shader_depth.frag[GLSL 片元着色器]

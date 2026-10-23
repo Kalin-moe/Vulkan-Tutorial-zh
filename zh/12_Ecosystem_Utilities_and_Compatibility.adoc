@@ -1,0 +1,551 @@
+:pp: {plus}{plus}
+
+= 生态系统工具与 GPU 兼容性
+
+== 简介
+
+本章将介绍 Vulkan 开发中重要的生态工具，并学习如何调整代码以支持更广泛的 GPU。随着 Vulkan 不断推出新版本和新特性，你需要理解如何：
+
+1. 了解不同 GPU 支持哪些特性
+2. 调整代码以保持对旧硬件的兼容性
+3. 在可用时有条件地使用高级特性
+
+这些知识对于开发能在多种硬件上运行的 Vulkan 应用至关重要，从最新的高端 GPU 到较旧或性能有限的设备都涵盖在内。
+
+== Vulkan 硬件数据库（GPUInfo.org）
+
+=== GPUInfo.org 简介
+
+link:https://vulkan.gpuinfo.org/[Vulkan 硬件数据库]（GPUInfo.org）对 Vulkan 开发者来说是极有价值的资源。这个由社区维护的数据库收集并展示各类 GPU 与设备的 Vulkan 支持情况。
+
+GPUInfo.org 提供以下详细信息：
+
+* 支持的 Vulkan 版本
+* 可用的扩展
+* 特性支持情况
+* 实现限制
+* 格式属性
+* 队列族属性
+
+这些信息由用户众包而来：他们运行 Vulkan Hardware Capability Viewer 工具，把自己的 GPU 能力上报到数据库。
+
+=== 在开发中使用 GPUInfo.org
+
+开发 Vulkan 应用时，GPUInfo.org 可以帮你：
+
+1. *确定最低要求*：弄清为了支持你想要覆盖的硬件范围，需要以哪个 Vulkan 版本和哪些扩展作为目标。
+
+2. *检查特性可用性*：确认动态渲染、时间线信号量、光线追踪等具体特性的支持是否普遍。
+
+3. *识别实现限制*：了解各种 Vulkan 特性在不同硬件上的实际限制。
+
+4. *比较厂商与设备*：了解 NVIDIA、AMD、Intel 以及移动 GPU 厂商在 Vulkan 支持上的差异。
+
+下面看几个使用 GPUInfo.org 的实际例子：
+
+==== 示例：检查 Vulkan 版本支持
+
+要弄清 Vulkan 1.3（引入动态渲染的版本）的支持面有多广：
+
+1. 访问 link:https://vulkan.gpuinfo.org/[GPUInfo.org]
+2. 进入“Core Version Support”页面
+3. 查看支持 Vulkan 1.3 的设备占比
+
+你会发现，较新的 GPU 虽然支持 Vulkan 1.3 及以上，但仍有大量设备停留在 Vulkan 1.0、1.1 或 1.2。
+
+==== 示例：检查扩展支持
+
+如果你在考虑使用某个扩展：
+
+1. 进入“Extensions”栏目
+2. 搜索你关注的扩展
+3. 查看它在不同厂商设备上的支持比例
+
+这能帮你决定是强制要求该扩展，还是提供一条回退路径。
+
+[[Example: Using the Vulkan Configurator Tool]]
+==== 示例：使用 Vulkan Configurator 工具
+
+Vulkan Configurator 工具（所有平台上可执行文件名都是 `vkconfig`）随 Vulkan SDK 一起提供，可以方便地配置系统中的 Vulkan 设置。用法如下：
+
+1. *启动 Vulkan Configurator*：
+   - Windows：建议从开始菜单启动“Vulkan Configurator”，因为在命令行运行 `vkconfig.exe` 只会显示有限的选项
+   - 其他平台：打开终端并运行 `vkconfig`
+
+   注意，所有平台上该可执行文件都叫 `vkconfig`。
+
+2. *配置验证层*：
+   - 切换到“Layers”标签页
+   - 根据调试需要启用或停用特定验证层
+   - 例如在开发期间启用 `VK_LAYER_KHRONOS_validation`，以捕获 API 使用错误
+
+3. *管理环境变量*：
+   - 进入“Settings”标签页
+   - 设置 `VK_LAYER_PATH` 或 `VK_ICD_FILENAMES` 之类的环境变量
+   - 这些设置可以应用到整个系统，也可以只对当前会话生效
+
+4. *配置驱动专属选项*：
+   - 部分 GPU 厂商提供了额外的配置选项
+   - 可以通过厂商专属的标签页访问这些选项
+
+5. *导出配置*：
+   - 保存配置以便日后使用，或分享给团队成员
+   - 这样能保证多台开发机上的 Vulkan 环境保持一致
+
+以下情况尤其适合使用 Vulkan Configurator：
+- 需要用不同验证层配置调试 Vulkan 应用时
+- 不修改代码就想用不同 Vulkan 设置测试应用时
+- 要搭建有特定 Vulkan 要求的开发环境时
+
+==== 用 Vulkan Configurator 代替代码管理验证层
+
+很多 Vulkan 应用会在创建实例时以编程方式启用验证层，通常只在调试构建中这样做。常见写法如下：
+
+[,c++]
+----
+// 定义验证层
+const std::vector<char const*> validationLayers = {
+    "VK_LAYER_KHRONOS_validation"
+};
+
+// 仅在调试构建中启用
+#ifdef NDEBUG
+constexpr bool enableValidationLayers = false;
+#else
+constexpr bool enableValidationLayers = true;
+#endif
+
+void createInstance() {
+    // 检查验证层是否可用
+    if (enableValidationLayers && !checkValidationLayerSupport()) {
+        throw std::runtime_error("validation layers requested, but not available!");
+    }
+
+    // 应用信息……
+
+    // 调试模式下启用验证层
+    std::vector<char const *> enabledLayers;
+    if (enableValidationLayers) {
+        enabledLayers.assign(validationLayers.begin(), validationLayers.end());
+    }
+
+    // 创建带验证层的实例
+    vk::InstanceCreateInfo createInfo{
+        .pApplicationInfo        = &appInfo,
+        .enabledLayerCount       = static_cast<uint32_t>(enabledLayers.size()),
+        .ppEnabledLayerNames     = enabledLayers.data(),
+        // ……其他参数
+    };
+
+    instance = vk::raii::Instance(context, createInfo);
+}
+----
+
+这种做法虽然可行，但有几个缺点：
+
+1. 启用或停用验证层都要修改代码并重新编译
+2. 想尝试不同的验证层配置更麻烦
+3. 增加了代码库的复杂度
+
+更好的做法是用 Vulkan Configurator 在外部管理验证层。要利用这一点，可以这样改代码：
+
+[,c++]
+----
+void createInstance() {
+    // 应用信息……
+
+    // 创建实例，但不显式启用验证层
+    vk::InstanceCreateInfo createInfo{
+        .pApplicationInfo        = &appInfo,
+        // ……其他参数
+    };
+
+    instance = vk::raii::Instance(context, createInfo);
+}
+----
+
+这样做的好处是：
+
+1. 应用里不再有任何验证层相关代码
+2. 需要时用 Vulkan Configurator 启用验证层
+3. 不用重新编译就能切换验证配置
+
+用 Vulkan Configurator 启用验证层的步骤：
+
+1. 启动 Vulkan Configurator（Windows 上从开始菜单启动，或在终端运行 `vkconfig`——所有平台上该可执行文件都叫 `vkconfig`）
+2. 进入“Layers”标签页
+3. 启用 `VK_LAYER_KHRONOS_validation` 验证层
+4. 应用设置
+
+该配置会作用于该环境中的所有 Vulkan 应用，因此不修改代码就能轻松开关验证层。
+
+这种做法的好处包括：
+
+* *代码更干净*：应用代码不必再处理验证层
+* *更灵活*：不重新编译就能更改验证设置
+* *更一致*：多个应用可以沿用同一套验证设置
+* *便于试验*：可以轻松尝试不同的验证配置
+
+=== 其他有用的生态工具
+
+除 GPUInfo.org 之外，还有几款工具能在开发和调试 Vulkan 应用时帮上忙：
+
+* *Vulkan SDK 工具*：
+** `vulkaninfo`：显示本地系统的 Vulkan 能力
+** `vkconfig`（Vulkan Configurator）：用于管理 Vulkan 设置的配置工具（详见 <<Example: Using the Vulkan Configurator Tool>>）
+** 验证层：帮助识别 API 使用错误
+** RenderDoc：图形调试工具
+
+* *厂商专属工具*：
+** NVIDIA Nsight Graphics
+** AMD Radeon GPU Profiler
+
+== 支持较旧的 GPU
+
+现在你已了解如何查明 GPU 能力，接下来看看怎样修改代码，以支持那些不具备动态渲染等 Vulkan 1.3/1.4 特性的旧 GPU。
+
+=== 检测可用特性
+
+第一步是检测用户 GPU 上有哪些特性可用。这一步在创建设备时完成：
+
+[,c++]
+----
+// 检查是否支持动态渲染
+bool dynamicRenderingSupported = false;
+
+// 检查是否支持 Vulkan 1.3
+if (deviceProperties.apiVersion >= VK_API_VERSION_1_3) {
+    dynamicRenderingSupported = true;
+} else {
+    // 在较旧的 Vulkan 版本上检查该扩展
+    for (const auto& extension : availableExtensions) {
+        if (strcmp(extension.extensionName, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME) == 0) {
+            dynamicRenderingSupported = true;
+            break;
+        }
+    }
+}
+
+// 保存该信息供后续使用
+appInfo.dynamicRenderingSupported = dynamicRenderingSupported;
+----
+
+=== 动态渲染的替代方案：传统渲染通道
+
+如果动态渲染不可用，就需要改用传统渲染通道和帧缓冲。这个替代方案可以这样实现：
+
+==== 创建渲染通道
+
+[,c++]
+----
+void createRenderPass() {
+    if (appInfo.dynamicRenderingSupported) {
+        // 动态渲染下不需要渲染通道
+        return;
+    }
+
+    // 颜色附件描述
+    vk::AttachmentDescription colorAttachment{
+        .format = swapChainImageFormat,
+        .samples = vk::SampleCountFlagBits::e1,
+        .loadOp = vk::AttachmentLoadOp::eClear,
+        .storeOp = vk::AttachmentStoreOp::eStore,
+        .stencilLoadOp = vk::AttachmentLoadOp::eDontCare,
+        .stencilStoreOp = vk::AttachmentStoreOp::eDontCare,
+        .initialLayout = vk::ImageLayout::eUndefined,
+        .finalLayout = vk::ImageLayout::ePresentSrcKHR
+    };
+
+    // 子通道对颜色附件的引用
+    vk::AttachmentReference colorAttachmentRef{
+        .attachment = 0,
+        .layout = vk::ImageLayout::eColorAttachmentOptimal
+    };
+
+    // 子通道描述
+    vk::SubpassDescription subpass{
+        .pipelineBindPoint = vk::PipelineBindPoint::eGraphics,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &colorAttachmentRef
+    };
+
+    // 依赖关系，确保图像布局正确转换
+    vk::SubpassDependency dependency{
+        .srcSubpass = VK_SUBPASS_EXTERNAL,
+        .dstSubpass = 0,
+        .srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput,
+        .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput,
+        .srcAccessMask = vk::AccessFlagBits::eNone,
+        .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite
+    };
+
+    // 创建渲染通道
+    vk::RenderPassCreateInfo renderPassInfo{
+        .attachmentCount = 1,
+        .pAttachments = &colorAttachment,
+        .subpassCount = 1,
+        .pSubpasses = &subpass,
+        .dependencyCount = 1,
+        .pDependencies = &dependency
+    };
+
+    renderPass = device.createRenderPass(renderPassInfo);
+}
+----
+
+==== 创建帧缓冲
+
+[,c++]
+----
+void createFramebuffers() {
+    if (appInfo.dynamicRenderingSupported) {
+        // 动态渲染下不需要帧缓冲
+        return;
+    }
+
+    swapChainFramebuffers.resize(swapChainImageViews.size());
+
+    for (size_t i = 0; i < swapChainImageViews.size(); i++) {
+        vk::ImageView attachments[] = {
+            swapChainImageViews[i]
+        };
+
+        vk::FramebufferCreateInfo framebufferInfo{
+            .renderPass = renderPass,
+            .attachmentCount = 1,
+            .pAttachments = attachments,
+            .width = swapChainExtent.width,
+            .height = swapChainExtent.height,
+            .layers = 1
+        };
+
+        swapChainFramebuffers[i] = device.createFramebuffer(framebufferInfo);
+    }
+}
+----
+
+==== 修改管线创建
+
+创建图形管线时，如果动态渲染不可用，就需要指定渲染通道：
+
+[,c++]
+----
+void createGraphicsPipeline() {
+    // ……已有的着色器阶段和固定功能设置……
+
+    vk::GraphicsPipelineCreateInfo pipelineInfo{};
+
+    if (appInfo.dynamicRenderingSupported) {
+        // 使用动态渲染
+        vk::PipelineRenderingCreateInfo pipelineRenderingCreateInfo{
+            .colorAttachmentCount = 1,
+            .pColorAttachmentFormats = &swapChainImageFormat
+        };
+
+        pipelineInfo.pNext = &pipelineRenderingCreateInfo;
+        pipelineInfo.renderPass = nullptr;
+    } else {
+        // 使用传统渲染通道
+        pipelineInfo.pNext = nullptr;
+        pipelineInfo.renderPass = renderPass;
+        pipelineInfo.subpass = 0;
+    }
+
+    // ……管线创建的其余部分……
+}
+----
+
+==== 调整命令缓冲区录制
+
+最后，需要调整命令缓冲区的录制方式：
+
+[,c++]
+----
+void recordCommandBuffer(vk::CommandBuffer commandBuffer, uint32_t imageIndex) {
+    // ……开始录制命令缓冲区……
+
+    if (appInfo.dynamicRenderingSupported) {
+        // 开始动态渲染
+        vk::RenderingAttachmentInfo colorAttachment{
+            .imageView = swapChainImageViews[imageIndex],
+            .imageLayout = vk::ImageLayout::eAttachmentOptimal,
+            .loadOp = vk::AttachmentLoadOp::eClear,
+            .storeOp = vk::AttachmentStoreOp::eStore,
+            .clearValue = clearColor
+        };
+
+        vk::RenderingInfo renderingInfo{
+            .renderArea = {{0, 0}, swapChainExtent},
+            .layerCount = 1,
+            .colorAttachmentCount = 1,
+            .pColorAttachments = &colorAttachment
+        };
+
+        commandBuffer.beginRendering(renderingInfo);
+    } else {
+        // 开始传统渲染通道
+        vk::RenderPassBeginInfo renderPassInfo{
+            .renderPass = renderPass,
+            .framebuffer = swapChainFramebuffers[imageIndex],
+            .renderArea = {{0, 0}, swapChainExtent},
+            .clearValueCount = 1,
+            .pClearValues = &clearColor
+        };
+
+        commandBuffer.beginRenderPass(renderPassInfo, vk::SubpassContents::eInline);
+    }
+
+    // ……绑定管线并绘制……
+
+    if (appInfo.dynamicRenderingSupported) {
+        commandBuffer.endRendering();
+    } else {
+        commandBuffer.endRenderPass();
+    }
+
+    // ……结束命令缓冲区……
+}
+----
+
+=== 处理其他 Vulkan 1.3/1.4 特性
+
+动态渲染只是一个例子，旧 GPU 上不可用的特性还有很多。以下其他 Vulkan 1.3/1.4 特性可能也需要你准备替代方案：
+
+==== 时间线信号量
+
+时间线信号量（Vulkan 1.2 引入）提供了比二元信号量更灵活的同步机制。如果它不可用，就需要改用二元信号量和栅栏：
+
+[,c++]
+----
+bool timelineSemaphoresSupported = false;
+
+// 检查是否支持 Vulkan 1.2 或该扩展
+if (deviceProperties.apiVersion >= VK_API_VERSION_1_2) {
+    timelineSemaphoresSupported = true;
+} else {
+    // 检查扩展
+    for (const auto& extension : availableExtensions) {
+        if (strcmp(extension.extensionName, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME) == 0) {
+            timelineSemaphoresSupported = true;
+            break;
+        }
+    }
+}
+
+// 创建相应的同步原语
+if (timelineSemaphoresSupported) {
+    // 创建时间线信号量
+    vk::SemaphoreTypeCreateInfo timelineCreateInfo{
+        .semaphoreType = vk::SemaphoreType::eTimeline,
+        .initialValue = 0
+    };
+
+    vk::SemaphoreCreateInfo semaphoreInfo{
+        .pNext = &timelineCreateInfo
+    };
+
+    timelineSemaphore = device.createSemaphore(semaphoreInfo);
+} else {
+    // 创建二元信号量和栅栏
+    vk::SemaphoreCreateInfo semaphoreInfo{};
+    vk::FenceCreateInfo fenceInfo{.flags = vk::FenceCreateFlagBits::eSignaled};
+
+    for (size_t i = 0; i < swapChainImages.size(); i++)
+    {
+        renderFinishedSemaphores[i] = device.createSemaphore(semaphoreInfo);
+    }
+
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        imageAvailableSemaphores[i] = device.createSemaphore(semaphoreInfo);
+        inFlightFences[i] = device.createFence(fenceInfo);
+    }
+}
+----
+
+==== Synchronization2
+
+Synchronization2 特性（Vulkan 1.3）简化了管线屏障与内存依赖。如果它不可用，就使用原有的同步命令：
+
+[,c++]
+----
+bool synchronization2Supported = false;
+
+// 检查是否支持 Vulkan 1.3 或该扩展
+if (deviceProperties.apiVersion >= VK_API_VERSION_1_3) {
+    synchronization2Supported = true;
+} else {
+    // 检查扩展
+    for (const auto& extension : availableExtensions) {
+        if (strcmp(extension.extensionName, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME) == 0) {
+            synchronization2Supported = true;
+            break;
+        }
+    }
+}
+
+// 使用相应的屏障命令
+if (synchronization2Supported) {
+    // 使用 Synchronization2 API
+    vk::ImageMemoryBarrier2 barrier{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTopOfPipe,
+        .srcAccessMask = vk::AccessFlagBits2::eNone,
+        .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+        .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eAttachmentOptimal,
+        .image = swapChainImages[i],
+        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+    };
+
+    vk::DependencyInfo dependencyInfo{
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &barrier
+    };
+
+    commandBuffer.pipelineBarrier2(dependencyInfo);
+} else {
+    // 使用原有的同步 API
+    vk::ImageMemoryBarrier barrier{
+        .srcAccessMask = vk::AccessFlagBits::eNone,
+        .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = swapChainImages[i],
+        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}
+    };
+
+    commandBuffer.pipelineBarrier(
+        vk::PipelineStageFlagBits::eTopOfPipe,
+        vk::PipelineStageFlagBits::eColorAttachmentOutput,
+        vk::DependencyFlagBits::eByRegion,
+        {},
+        {},
+        { barrier }
+    );
+}
+----
+
+== 跨 GPU 兼容性的最佳实践
+
+根据前面的内容，下面是一些最佳实践，帮助你开发能在各种 GPU 上运行的 Vulkan 应用：
+
+1. *在运行时检查特性可用性*：不要只凭 Vulkan 版本就假定特性可用。始终检查具体的特性和扩展。
+
+2. *提供回退路径*：为现代特性不可用的情况实现替代代码路径。
+
+3. *使用特性结构体*：创建逻辑设备时，用相应的特性结构体只启用你确实需要且确实可用的特性。
+
+4. *在多种硬件上测试*：借助 GPUInfo.org 找出常见的硬件配置，并在有代表性的样本上测试应用。
+
+5. *优雅降级*：设计应用时，让它在性能较弱的硬件上平稳地降低画质或功能。
+
+6. *记录需求*：清楚写明应用对 Vulkan 版本和扩展的最低要求与推荐要求。
+
+== 小结
+
+了解 Vulkan 生态工具、懂得针对不同 GPU 能力调整代码，是 Vulkan 开发者必备的技能。按照本章介绍的方法，你可以做出能在多种硬件上运行的应用，同时在条件允许时仍能利用最新特性。
+
+link:/attachments/32_ecosystem_utilities.cpp[C{pp} 代码]

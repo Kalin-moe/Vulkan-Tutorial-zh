@@ -1,0 +1,705 @@
+:pp: {plus}{plus}
+
+= 迁移到现代资源格式：glTF 与 KTX2
+
+== 简介
+
+在前面的章节中，我们用 tinyobjloader 加载 Wavefront OBJ 格式的 3D 模型，用 stb_image 加载 PNG、JPEG 等常见格式的纹理。这些库和格式固然简单且被广泛支持，但现代图形应用往往能从更高级的资源格式中获益。
+
+本章将探讨如何从以下组合迁移：
+
+1. Wavefront OBJ（用 tinyobjloader 加载）迁移到 glTF（用 tinygltf 加载）
+2. PNG 等常见图像格式（用 stb_image 加载）迁移到 KTX2（用 KTX 库加载）
+
+这次迁移带来若干好处：
+
+* **更完整的模型数据**：glTF 支持动画、骨骼绑定、PBR 材质等
+* **GPU 优化的纹理**：KTX2 支持压缩纹理格式、mipmap 以及其他对 GPU 友好的特性
+* **业界标准**：glTF 和 KTX2 都是 Khronos 专为现代图形 API 设计的标准
+
+下面深入迁移过程，看看如何让 Vulkan 应用改用这些现代格式。
+
+== 理解 glTF
+
+=== 什么是 glTF？
+
+https://www.khronos.org/gltf/[glTF]（GL Transmission Format）是一份免版税的规范，用于高效传输和加载 3D 场景与模型。glTF 由 Khronos 组织制定，设计目标是成为“3D 领域的 JPEG”——一种面向 3D 内容的通用发布格式。
+
+glTF 的关键特性包括：
+
+* **紧凑的文件大小**：二进制数据以高效方式存储
+* **加载迅速**：尽量减少加载时需要做的处理
+* **完整的 3D 场景表示**：包含网格、材质、纹理、动画等
+* **可直接用于运行时**：数据以 GPU 能直接使用的格式存储
+* **可扩展**：该格式可以通过新能力进行扩展
+
+=== OBJ 与 glTF 对比
+
+下面把 OBJ 格式与 glTF 做个对比：
+
+[cols="1,1,1"]
+|===
+|特性 |OBJ |glTF
+
+|文件格式
+|基于文本
+|JSON + 二进制数据（单文件可选 GLB）
+
+|支持的数据
+|几何体、基础材质、纹理坐标
+|几何体、PBR 材质、动画、骨骼、场景、相机等
+
+|材质系统
+|基础（MTL 文件）
+|基于物理的渲染（PBR）
+
+|动画支持
+|无
+|关键帧动画与骨骼动画
+
+|坐标系
+|右手
+|右手，Y 轴向上
+
+|业界采用情况
+|传统标准
+|实时 3D 的现代标准
+|===
+
+== 理解 KTX2
+
+=== 什么是 KTX2？
+
+https://www.khronos.org/ktx/[KTX2]（Khronos Texture 2.0）是一种容器文件格式，用于存储针对 GPU 使用做过优化的纹理数据。它的设计目标是与 Vulkan、OpenGL 和 DirectX 等现代图形 API 高效配合。
+
+KTX2 的关键特性包括：
+
+* **GPU 就绪的格式**：支持包括压缩格式在内的所有 GPU 纹理格式
+* **mipmap 存储**：高效存储完整的 mipmap 链
+* **元数据**：包含纹理属性的相关信息
+* **超级压缩**：支持 Basis Universal 等额外压缩
+* **直接上传**：数据通常无需处理即可直接上传到 GPU
+
+=== PNG/JPEG 与 KTX2 对比
+
+下面把传统图像格式与 KTX2 做个对比：
+
+[cols="1,1,1"]
+|===
+|特性 |PNG/JPEG |KTX2
+
+|文件格式
+|通用图像格式
+|GPU 优化的纹理容器
+
+|压缩
+|通用压缩（PNG）或有损压缩（JPEG）
+|GPU 纹理压缩（BC、ETC、ASTC）+ 超级压缩
+
+|mipmap
+|不支持
+|内置 mipmap 链支持
+
+|GPU 上传
+|需要转换
+|可直接上传到 GPU
+
+|元数据
+|有限
+|完整的纹理元数据
+
+|支持的特性
+|基础 2D 图像
+|所有 GPU 纹理类型（2D、3D、立方体贴图、数组）
+|===
+
+== 从 tinyobjloader 迁移到 tinygltf
+
+为了加载 glTF 模型（而不是 obj），我们将使用开源的 link:https://github.com/syoyo/tinygltf[仅头文件的 C{pp} tiny glTF 库]。
+
+=== 配置 tinygltf
+
+首先，需要引入 tinygltf 库来替代 tinyobjloader：
+
+[,c{pp}]
+----
+// 替换掉这段：
+#define TINYOBJLOADER_IMPLEMENTATION
+#include <tiny_obj_loader.h>
+
+// 改用这段：
+#define TINYGLTF_IMPLEMENTATION
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <tiny_gltf.h>
+----
+
+注意 tinygltf 内部使用 stb_image 加载图像，不过稍后我们会用 KTX2 取代纹理加载代码。
+
+=== 加载 glTF 模型
+
+现在修改 `loadModel()` 函数，改用 tinygltf 而不是 tinyobjloader：
+
+[,c{pp}]
+----
+void loadModel()
+{
+    // 用 tinygltf 加载模型，替代 tinyobjloader
+    tinygltf::Model    model;
+    tinygltf::TinyGLTF loader;
+    std::string        err;
+    std::string        warn;
+
+    bool ret = loader.LoadBinaryFromFile(&model, &err, &warn, MODEL_PATH);
+
+    if (!warn.empty())
+    {
+        std::cout << "glTF warning: " << warn << std::endl;
+    }
+
+    if (!err.empty())
+    {
+        std::cout << "glTF error: " << err << std::endl;
+    }
+
+    if (!ret)
+    {
+        throw std::runtime_error("Failed to load glTF model");
+    }
+
+    vertices.clear();
+    indices.clear();
+
+    // 处理模型中的所有网格
+    for (const auto &mesh : model.meshes)
+    {
+        for (const auto &primitive : mesh.primitives)
+        {
+            // 获取索引
+            const tinygltf::Accessor   &indexAccessor   = model.accessors[primitive.indices];
+            const tinygltf::BufferView &indexBufferView = model.bufferViews[indexAccessor.bufferView];
+            const tinygltf::Buffer     &indexBuffer     = model.buffers[indexBufferView.buffer];
+
+            // 获取顶点位置
+            const tinygltf::Accessor   &posAccessor   = model.accessors[primitive.attributes.at("POSITION")];
+            const tinygltf::BufferView &posBufferView = model.bufferViews[posAccessor.bufferView];
+            const tinygltf::Buffer     &posBuffer     = model.buffers[posBufferView.buffer];
+
+            // 如果有纹理坐标就获取它们
+            bool                        hasTexCoords       = primitive.attributes.find("TEXCOORD_0") != primitive.attributes.end();
+            const tinygltf::Accessor   *texCoordAccessor   = nullptr;
+            const tinygltf::BufferView *texCoordBufferView = nullptr;
+            const tinygltf::Buffer     *texCoordBuffer     = nullptr;
+
+            if (hasTexCoords)
+            {
+                texCoordAccessor   = &model.accessors[primitive.attributes.at("TEXCOORD_0")];
+                texCoordBufferView = &model.bufferViews[texCoordAccessor->bufferView];
+                texCoordBuffer     = &model.buffers[texCoordBufferView->buffer];
+            }
+
+            uint32_t baseVertex = static_cast<uint32_t>(vertices.size());
+
+            for (size_t i = 0; i < posAccessor.count; i++)
+            {
+                Vertex vertex{};
+
+                const float *pos = reinterpret_cast<const float *>(&posBuffer.data[posBufferView.byteOffset + posAccessor.byteOffset + i * 12]);
+                // glTF 使用右手、Y 轴向上的坐标系，而本场景采用 Z 轴向上。
+                // 在这里对 Y 坐标取负会让模型被镜像，而不是被重新定向——
+                // Vulkan 的裁剪空间 Y 轴约定已经在 updateUniformBuffer 中通过
+                // proj[1][1] *= -1 单独处理过了，所以我们保持位置不变，
+                // 由那里的旋转来完成 Y-up 到 Z-up 的转换。
+                vertex.pos = {pos[0], pos[1], pos[2]};
+
+                if (hasTexCoords)
+                {
+                    const float *texCoord = reinterpret_cast<const float *>(&texCoordBuffer->data[texCoordBufferView->byteOffset + texCoordAccessor->byteOffset + i * 8]);
+                    vertex.texCoord       = {texCoord[0], texCoord[1]};
+                }
+                else
+                {
+                    vertex.texCoord = {0.0f, 0.0f};
+                }
+
+                vertex.color = {1.0f, 1.0f, 1.0f};
+
+                vertices.push_back(vertex);
+            }
+
+            const unsigned char *indexData   = &indexBuffer.data[indexBufferView.byteOffset + indexAccessor.byteOffset];
+            size_t               indexCount  = indexAccessor.count;
+            size_t               indexStride = 0;
+
+            // 根据分量类型确定索引步长
+            if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT)
+            {
+                indexStride = sizeof(uint16_t);
+            }
+            else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT)
+            {
+                indexStride = sizeof(uint32_t);
+            }
+            else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE)
+            {
+                indexStride = sizeof(uint8_t);
+            }
+            else
+            {
+                throw std::runtime_error("Unsupported index component type");
+            }
+
+            indices.reserve(indices.size() + indexCount);
+
+            for (size_t i = 0; i < indexCount; i++)
+            {
+                uint32_t index = 0;
+
+                if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT)
+                {
+                    index = *reinterpret_cast<const uint16_t *>(indexData + i * indexStride);
+                }
+                else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT)
+                {
+                    index = *reinterpret_cast<const uint32_t *>(indexData + i * indexStride);
+                }
+                else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE)
+                {
+                    index = *reinterpret_cast<const uint8_t *>(indexData + i * indexStride);
+                }
+
+                indices.push_back(baseVertex + index);
+            }
+        }
+    }
+}
+----
+
+与 tinyobjloader 版本相比，这份实现的主要差异在于：
+
+1. **数据结构**：glTF 使用更复杂的数据结构，包含访问器（accessor）、缓冲区视图（buffer view）和缓冲区（buffer）
+2. **属性访问**：需要通过这些结构逐层定位，才能访问顶点数据
+3. **多网格与多图元**：glTF 模型可以包含多个网格，每个网格又可以有多个图元
+4. **分量类型**：需要处理不同的索引分量类型（8 位、16 位、32 位）
+
+=== 进阶 glTF 特性
+
+我们的基础实现只提取了几何体和纹理坐标，而 glTF 还支持许多你可能想用的特性：
+
+* **材质**：通过 `primitive.material` 访问 PBR 材质属性
+* **动画**：处理 `model.animations` 中的动画数据
+* **骨骼**：处理 `model.skins` 中的骨骼数据
+* **场景与节点**：通过 `model.scenes` 和 `model.nodes` 处理场景层级
+
+在完整的应用中，通常还要处理这些额外特性，才能充分利用 glTF。
+
+== 从 stb_image 迁移到 KTX
+
+为了加载 KTX 文件（而不是 png、jpeg 这类格式），我们将使用开源的 link:https://github.com/KhronosGroup/KTX-Software[KTX（Khronos Texture）库与工具]。
+
+=== 配置 KTX
+
+首先，需要引入 KTX 库：
+
+[,c{pp}]
+----
+// 替换掉这段：
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
+// 改用这段：
+#include <ktx.h>
+----
+
+=== 加载 KTX2 纹理
+
+现在修改 `createTextureImage()` 函数，改用 KTX 而不是 stb_image：
+
+[,c{pp}]
+----
+void createTextureImage() {
+    // 加载 KTX2 纹理，不再使用 stb_image
+    ktxTexture* kTexture;
+    KTX_error_code result = ktxTexture_CreateFromNamedFile(
+        TEXTURE_PATH.c_str(),
+        KTX_TEXTURE_CREATE_LOAD_IMAGE_DATA_BIT,
+        &kTexture);
+
+    if (result != KTX_SUCCESS) {
+        throw std::runtime_error("failed to load ktx texture image!");
+    }
+
+    // 获取纹理尺寸与数据
+    uint32_t texWidth = kTexture->baseWidth;
+    uint32_t texHeight = kTexture->baseHeight;
+    ktx_size_t imageSize = ktxTexture_GetImageSize(kTexture, 0);
+    ktx_uint8_t* ktxTextureData = ktxTexture_GetData(kTexture);
+
+    // 创建暂存缓冲区
+    vk::raii::Buffer stagingBuffer({});
+    vk::raii::DeviceMemory stagingBufferMemory({});
+    createBuffer(imageSize, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent, stagingBuffer, stagingBufferMemory);
+
+    // 把纹理数据复制到暂存缓冲区
+    void* data = stagingBufferMemory.mapMemory(0, imageSize);
+    memcpy(data, ktxTextureData, imageSize);
+    stagingBufferMemory.unmapMemory();
+
+    // 根据 KTX 格式确定 Vulkan 格式
+    vk::Format textureFormat = vk::Format::eR8G8B8A8Srgb; // 默认格式，本应从 KTX 元数据中判断
+
+    // 创建纹理图像
+    createImage(texWidth, texHeight, textureFormat, vk::ImageTiling::eOptimal,
+               vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+               vk::MemoryPropertyFlagBits::eDeviceLocal, textureImage, textureImageMemory);
+
+    // 把数据从暂存缓冲区复制到纹理图像
+    transitionImageLayout(textureImage, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal);
+    copyBufferToImage(stagingBuffer, textureImage, texWidth, texHeight);
+    transitionImageLayout(textureImage, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal);
+
+    // 清理 KTX 资源
+    ktxTexture_Destroy(kTexture);
+}
+----
+
+与 stb_image 版本相比，这份实现的主要差异在于：
+
+1. **加载 API**：改用 KTX API 加载纹理
+2. **纹理元数据**：KTX 提供纹理属性的元数据
+3. **资源清理**：需要显式销毁 KTX 纹理对象
+
+=== 进阶 KTX 特性
+
+这份基础实现只处理简单的 2D 纹理，而 KTX2 支持的特性多得多：
+
+==== 处理 mipmap
+
+KTX2 文件可以包含预先生成好的 mipmap。用法如下：
+
+[,c{pp}]
+----
+// 获取 mipmap 层级数
+uint32_t mipLevels = kTexture->numLevels;
+
+// 创建支持 mipmap 的图像
+vk::ImageCreateInfo imageInfo{
+    // ... 其他参数 ...
+    .mipLevels = mipLevels,
+    // ... 其他参数 ...
+};
+
+// 复制每个 mip 层级
+for (uint32_t i = 0; i < mipLevels; i++) {
+    ktx_size_t offset;
+    KTX_error_code result = ktxTexture_GetImageOffset(kTexture, i, 0, 0, &offset);
+
+    // ... 把这个 mip 层级复制到图像 ...
+}
+----
+
+==== 使用压缩纹理格式
+
+KTX2 支持 GPU 纹理压缩格式。处理方式如下：
+
+[,c{pp}]
+----
+// 根据 KTX 格式确定 Vulkan 格式
+vk::Format textureFormat;
+switch (kTexture->vkFormat) {
+    case VK_FORMAT_BC7_SRGB_BLOCK:
+        textureFormat = vk::Format::eBc7SrgbBlock;
+        break;
+    case VK_FORMAT_BC5_UNORM_BLOCK:
+        textureFormat = vk::Format::eBc5UnormBlock;
+        break;
+    // ... 其他格式映射 ...
+    default:
+        textureFormat = vk::Format::eR8G8B8A8Srgb;
+        break;
+}
+----
+
+==== 处理立方体贴图与纹理数组
+
+KTX2 可以存储立方体贴图和纹理数组：
+
+[,c{pp}]
+----
+// 检查纹理是否为立方体贴图
+bool isCubemap = kTexture->isCubemap;
+
+// 获取层数
+uint32_t layerCount = kTexture->numLayers;
+
+// 创建合适的图像
+vk::ImageCreateInfo imageInfo{
+    // ... 其他参数 ...
+    .imageType = vk::ImageType::e2D,
+    .arrayLayers = layerCount,
+    .flags = isCubemap ? vk::ImageCreateFlagBits::eCubeCompatible : vk::ImageCreateFlags(),
+    // ... 其他参数 ...
+};
+----
+
+== 把资源转换为 glTF 与 KTX2
+
+=== 把 OBJ 转换为 glTF
+
+要把现有的 OBJ 文件转换为 glTF，可以使用多种工具：
+
+* **Blender**：打开 OBJ 文件，然后导出为 glTF
+* **obj2gltf**：一个把 OBJ 转换为 glTF 的命令行工具
+* **assimp**：一个能在多种 3D 格式之间转换的库
+
+用 obj2gltf 的示例：
+
+[,bash]
+----
+obj2gltf -i model.obj -o model.gltf
+----
+
+== 处理 KTX2 文件
+
+=== 创建 KTX2 文件
+
+创建 KTX2 文件有几种方式：
+
+==== 使用 KTX-Software 工具
+
+KTX-Software 软件包提供了创建 KTX2 文件的命令行工具：
+
+* **ktx create**：从现有图像创建 KTX2 文件的主要工具
+
+NOTE: 独立的 `toktx` 可执行文件已被统一的 `ktx` CLI 的 `create` 子命令取代。除了命令名不同，还有两点变化：输入文件现在位于输出文件 *之前*（而不是之后），并且 `--format` 成为必需参数，它接受 `VkFormat` 名称（去掉 `VK_FORMAT_` 前缀），而不是简短的压缩编解码器名称。
+
+一般用法：
+
+[,bash]
+----
+# 创建一个基本的 KTX2 文件
+ktx create --format R8G8B8A8_SRGB texture.png texture.ktx2
+
+# 创建带 mipmap 的 KTX2 文件
+ktx create --format R8G8B8A8_SRGB --generate-mipmap texture.png texture.ktx2
+
+# 创建使用 Basis Universal（ETC1S）压缩的 KTX2 文件
+ktx create --format R8G8B8A8_SRGB --encode basis-lz texture.png texture.ktx2
+
+# 创建使用特定 GPU 块压缩格式（BC7）的 KTX2 文件
+ktx create --format BC7_SRGB_BLOCK texture.png texture.ktx2
+
+# 创建立方体贴图 KTX2 文件
+ktx create --format R8G8B8A8_SRGB --cubemap posx.png negx.png posy.png negy.png posz.png negz.png cubemap.ktx2
+----
+
+==== 使用 KTX 库 API
+
+你也可以用 KTX 库 API 以编程方式创建 KTX2 文件：
+
+[,c{pp}]
+----
+#include <ktx.h>
+
+// 新建一个 KTX2 纹理
+ktxTexture2* texture;
+ktxTextureCreateInfo createInfo = {
+    .vkFormat = VK_FORMAT_R8G8B8A8_SRGB,
+    .baseWidth = 512,
+    .baseHeight = 512,
+    .baseDepth = 1,
+    .numDimensions = 2,
+    .numLevels = 1,
+    .numLayers = 1,
+    .numFaces = 1,
+    .isArray = KTX_FALSE,
+    .generateMipmaps = KTX_FALSE
+};
+
+KTX_error_code result = ktxTexture2_Create(&createInfo, KTX_TEXTURE_CREATE_ALLOC_STORAGE, &texture);
+
+// 设置图像数据
+uint32_t* imageData = new uint32_t[512 * 512];
+// ... 填充图像数据 ...
+ktxTexture_SetImageFromMemory(ktxTexture(texture), 0, 0, 0, imageData, 512 * 512 * 4);
+
+// 写入文件
+ktxTexture_WriteToNamedFile(ktxTexture(texture), "output.ktx2");
+
+// 清理
+ktxTexture_Destroy(ktxTexture(texture));
+delete[] imageData;
+----
+
+==== 使用图像编辑软件
+
+有些图像编辑和 3D 建模软件可以直接导出 KTX2：
+
+* **Substance Designer**：可以直接把纹理导出为 KTX2 格式
+* **Blender**：借助插件可以把纹理导出为 KTX2
+* **GIMP**：借助 KTX 插件可以把图像保存为 KTX2
+
+=== 从其他格式转换为 KTX2
+
+KTX2 文件可以从多种常见图像格式创建：
+
+==== 从 PNG/JPEG/TIFF 转换
+
+最简单的转换是用 `ktx create` 处理标准图像格式：
+
+[,bash]
+----
+# 把 PNG 转换为 KTX2
+ktx create --format R8G8B8A8_SRGB texture.png texture.ktx2
+
+# 把 JPEG 转换为 KTX2
+ktx create --format R8G8B8A8_SRGB texture.jpg texture.ktx2
+
+# 把 TIFF 转换为 KTX2
+ktx create --format R8G8B8A8_SRGB texture.tiff texture.ktx2
+----
+
+==== 从 DDS（DirectX 纹理格式）转换
+
+DDS 是另一种针对 GPU 优化的纹理格式，常与 DirectX 配合使用：
+
+[,bash]
+----
+# 先使用 texconv 把 DDS 转换为 PNG
+texconv -ft png texture.dds
+
+# 再把 PNG 转换为 KTX2
+ktx create --format R8G8B8A8_SRGB texture.png texture.ktx2
+----
+
+也可以直接转换现有的 KTX1 文件：
+
+[,bash]
+----
+ktx convert texture.ktx texture.ktx2
+----
+
+==== 从 HDR/EXR（高动态范围格式）转换
+
+对于 HDR 纹理，应使用浮点格式，而不是 8 位 UNORM/SRGB 格式：
+
+[,bash]
+----
+# 把 HDR 转换为 KTX2
+ktx create --format R16G16B16A16_SFLOAT texture.hdr texture.ktx2
+
+# 把 EXR 转换为 KTX2（可能需要中间转换）
+ktx create --format R16G16B16A16_SFLOAT texture.exr texture.ktx2
+----
+
+==== 从 PSD（Photoshop）转换
+
+对于 Photoshop 文件：
+
+[,bash]
+----
+# 先把 PSD 导出为 PNG
+# 再转换为 KTX2
+ktx create --format R8G8B8A8_SRGB texture.png texture.ktx2
+----
+
+=== 优化 KTX2 文件
+
+要充分发挥 KTX2 文件的优势，可以考虑以下优化手段：
+
+==== 压缩选项
+
+KTX2 支持多种压缩方式：
+
+[,bash]
+----
+# Basis Universal 压缩（高度可移植）
+ktx create --format R8G8B8A8_SRGB --encode basis-lz texture.png texture.ktx2
+
+# ASTC 压缩（适合移动端）
+ktx create --format ASTC_4x4_SRGB_BLOCK texture.png texture.ktx2
+
+# BC7 压缩（适合桌面端）
+ktx create --format BC7_SRGB_BLOCK texture.png texture.ktx2
+
+# ETC2 压缩（适合 Android）
+ktx create --format ETC2_R8G8B8A8_SRGB_BLOCK texture.png texture.ktx2
+----
+
+==== 生成 mipmap
+
+mipmap 能提升渲染性能与画质：
+
+[,bash]
+----
+# 生成 mipmap
+ktx create --format R8G8B8A8_SRGB --generate-mipmap texture.png texture.ktx2
+
+# 使用特定滤镜生成 mipmap
+ktx create --format R8G8B8A8_SRGB --generate-mipmap --mipmap-filter lanczos4 texture.png texture.ktx2
+----
+
+==== 元数据
+
+可以用 `ktx info` 查看 KTX2 文件中已嵌入的键值元数据；而在创建时添加自定义键值对，则由 `ktx` 工具集中的另一个步骤完成，并不对应 `create` 的某个标志——具体请查看你所安装的 KTX-Software 版本中的 `ktx help create`，因为这一点在不同版本之间有过变化。
+
+=== 处理 KTX2 文件的工具
+
+有多种工具可用于处理 KTX2 文件：
+
+==== 命令行工具
+
+* **KTX-Software 套件**（`ktx` CLI，它取代了独立的 `toktx`/`ktx2ktx2`/`ktxinfo`/`ktxsc`/`ktxunpack` 可执行文件）：
+  * `ktx create`：创建 KTX2 文件
+  * `ktx convert`：在 KTX 各版本之间转换
+  * `ktx info`：显示 KTX 文件的信息
+  * `ktx deflate`：对 KTX2 文件应用超级压缩
+  * `ktx extract`：把 KTX 文件解包为单张图像
+
+==== 库与 SDK
+
+* **KTX-Software 库**：用于读写和处理 KTX 文件的 C/C++ 库
+* **libktx**：KTX-Software 使用的核心库
+* **Basis Universal**：KTX2 中使用的压缩技术
+* **Vulkan SDK**：包含 KTX 工具与库
+* **glTF-Transform**：可处理 glTF 文件中 KTX2 纹理的 JavaScript 库
+
+==== 查看器与调试器
+
+* **KTX Load Test**：KTX-Software 的一部分，用于查看 KTX 文件
+* **RenderDoc**：可以检视 KTX2 纹理的图形调试器
+* **Khronos Texture Tools**：包含 KTX 文件的查看器
+* **glTF Viewer**：许多 glTF 查看器都支持 KTX2 纹理
+
+==== 与游戏引擎集成
+
+* **Unity**：通过插件支持 KTX2
+* **Unreal Engine**：通过插件支持 KTX2
+* **Godot**：正在开发 KTX2 支持
+* **Three.js**：支持 KTX2 纹理
+* **Babylon.js**：支持 KTX2 纹理
+
+=== 把图像转换为 KTX2
+
+要把现有的图像文件转换为 KTX2，可以使用：
+
+* **ktx create**：KTX-Software 软件包附带的命令行工具
+* **KTX-Software**：一套用于创建和操作 KTX 文件的库与工具
+
+用 `ktx create` 创建一个带 Basis Universal 压缩的 KTX2 文件的示例：
+
+[,bash]
+----
+ktx create --format R8G8B8A8_SRGB --encode basis-lz texture.png texture.ktx2
+----
+
+== 结语
+
+从 OBJ/PNG 迁移到 glTF/KTX2，能为现代图形应用带来明显收益：
+
+* **更好的性能**：针对 GPU 使用优化的格式
+* **更多特性**：支持进阶 3D 特性与纹理格式
+* **业界标准**：专为现代图形 API 设计的格式
+
+虽然迁移需要改一些代码，但它在性能、功能和长期适用性上的收益，对严肃的图形应用来说完全值得。
+
+link:/attachments/35_gltf_ktx.cpp[C{pp} 代码]

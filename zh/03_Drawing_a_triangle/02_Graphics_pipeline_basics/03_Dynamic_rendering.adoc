@@ -1,0 +1,63 @@
+:pp: {plus}{plus}
+
+= 动态渲染
+
+== 引言
+
+在以前的 Vulkan 版本中，创建管线之前必须先通过渲染通道对象，告诉 Vulkan
+渲染时会用到哪些帧缓冲附件。不过，随着 Vulkan 1.3 引入动态渲染，现在
+可以在创建图形管线时、以及录制命令缓冲区时直接指定这些信息。
+
+动态渲染省去了对渲染通道和帧缓冲对象的需要，从而简化了渲染流程。取而代之
+的是，在开始渲染时可以直接指定颜色、深度和模板附件。
+
+== 管线渲染创建信息
+
+要使用动态渲染，需要指定渲染期间将使用的附件格式。这通过创建图形管线时的
+`vk::PipelineRenderingCreateInfo` 结构体完成：
+
+[,c++]
+----
+vk::PipelineRenderingCreateInfo pipelineRenderingCreateInfo{ .colorAttachmentCount = 1, .pColorAttachmentFormats = &swapChainSurfaceFormat.format };
+----
+
+该结构体指定我们将使用一个颜色附件，格式与交换链图像一致。然后把这个
+结构体纳入 `vk::StructureChain`，这条链以 `vk::GraphicsPipelineCreateInfo`
+结构体打头：
+
+[,c++]
+----
+vk::StructureChain<vk::GraphicsPipelineCreateInfo, vk::PipelineRenderingCreateInfo> pipelineCreateInfoChain = {
+    {.stageCount          = 2,
+     .pStages             = shaderStages,
+     .pVertexInputState   = &vertexInputInfo,
+     .pInputAssemblyState = &inputAssembly,
+     .pViewportState      = &viewportState,
+     .pRasterizationState = &rasterizer,
+     .pMultisampleState   = &multisampling,
+     .pColorBlendState    = &colorBlending,
+     .pDynamicState       = &dynamicState,
+     .layout              = pipelineLayout,
+     .renderPass          = nullptr},
+    {.colorAttachmentCount = 1, .pColorAttachmentFormats = &swapChainSurfaceFormat.format}};
+----
+
+注意 `renderPass` 参数被设为 `nullptr`，因为我们使用动态渲染而不是传统
+渲染通道。
+
+== 命令缓冲区录制
+
+录制命令缓冲区时，我们会用 `vk::CommandBuffer::beginRendering` 函数开始
+渲染到指定的附件。绘制一章会详细讲解这一点。
+
+动态渲染的优势在于，它省去了渲染通道和帧缓冲对象，从而简化渲染流程。
+它还提供了更大的灵活性：无需创建新的渲染通道对象，就能更换渲染目标
+附件。
+
+在 xref:./04_Conclusion.adoc[下一章]里，我们会把所有内容整合起来，最终
+创建图形管线对象！
+
+link:/attachments/12_graphics_pipeline_complete.cpp[C{pp} 代码] /
+link:/attachments/09_shader_base.slang[Slang 着色器] /
+link:/attachments/09_shader_base.vert[GLSL 顶点着色器] /
+link:/attachments/09_shader_base.frag[GLSL 片元着色器]

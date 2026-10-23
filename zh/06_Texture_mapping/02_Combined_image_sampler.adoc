@@ -1,0 +1,253 @@
+:pp: {plus}{plus}
+
+= 组合图像采样器
+
+== 引言
+
+在教程讲统一缓冲区的那一部分，我们第一次接触了描述符。
+本章来看一种新的描述符类型：_组合图像采样器_。
+有了这种描述符，着色器就能通过采样器对象访问图像资源，就像上一章创建的那个采样器一样。
+
+值得一提的是，Vulkan 在着色器如何访问纹理上提供了灵活性，可以通过不同的描述符类型来实现。本教程将使用__组合图像采样器__，但 Vulkan 也支持为采样器（`vk::DescriptorType::eSampler`）和被采样图像（`vk::DescriptorType::eSampledImage`）分别使用独立的描述符。使用独立描述符，可以让你把同一个采样器复用到多张图像上，也可以用不同的采样参数访问同一张图像。当你有许多采用相同采样配置的纹理时，这种做法可能更高效。不过组合图像采样器通常更方便，而且由于缓存使用得到了优化，在某些硬件上还能提供更好的性能。
+
+首先修改描述符集布局、描述符池和描述符集，把组合图像采样器描述符加入其中。
+之后会给 `Vertex` 增加纹理坐标、去掉颜色值，并修改片元着色器，让它从纹理中读取颜色，而不是仅仅插值顶点颜色。
+
+== 更新描述符
+
+打开 `createDescriptorSetLayout` 函数，为组合图像采样器描述符添加一个 `vk::DescriptorSetLayoutBinding`。
+直接把它放在统一缓冲区之后的绑定点上：
+
+[,c++]
+----
+std::array<vk::DescriptorSetLayoutBinding, 2> bindings{
+    {{.binding = 0, .descriptorType = vk::DescriptorType::eUniformBuffer, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eVertex},
+     {.binding = 1, .descriptorType = vk::DescriptorType::eCombinedImageSampler, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eFragment}}};
+
+vk::DescriptorSetLayoutCreateInfo layoutInfo{.bindingCount = static_cast<uint32_t>(bindings.size()), .pBindings = bindings.data()};
+----
+
+一定要设置好 `stageFlags`，表明打算在片元着色器中使用这个组合图像采样器描述符。
+片元的颜色正是在那里确定的。
+也可以在顶点着色器中使用纹理采样，例如用 https://en.wikipedia.org/wiki/Heightmap[高度图]动态变形一整片顶点。
+
+还必须把描述符池建得更大，为分配组合图像采样器留出空间：在 `vk::DescriptorPoolCreateInfo` 中再加一个类型为 `vk::DescriptorType::eCombinedImageSampler` 的 `vk::PoolSize`。
+打开 `createDescriptorPool` 函数，为这个描述符添加一个 `vk::DescriptorPoolSize`：
+
+[,c++]
+----
+std::array<vk::DescriptorPoolSize, 2> poolSize{{{.type = vk::DescriptorType::eUniformBuffer, .descriptorCount = MAX_FRAMES_IN_FLIGHT},
+                                                {.type = vk::DescriptorType::eCombinedImageSampler, .descriptorCount = MAX_FRAMES_IN_FLIGHT}}};
+vk::DescriptorPoolCreateInfo          poolInfo{.flags         = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
+                                               .maxSets       = MAX_FRAMES_IN_FLIGHT,
+                                               .poolSizeCount = static_cast<uint32_t>(poolSize.size()),
+                                               .pPoolSizes    = poolSize.data()};
+----
+
+描述符池不够用，是验证层抓不到的问题的一个典型例子：从 Vulkan 1.1 起，如果池不够大，`vk::raii::Device::allocateDescriptorSets` 可能失败并抛出 `vk::OutOfPoolMemoryError` 异常，但驱动也可能尝试在内部解决这个问题。
+这意味着有时（取决于硬件、池大小和分配大小）即使分配超出了描述符池的限制，驱动也会放过你。
+另一些时候，`vk::raii::Device::allocateDescriptorSets` 会失败并抛出 `vk::OutOfPoolMemoryError` 异常。
+如果分配在某些机器上成功、在另一些机器上却失败，这会格外让人头疼。
+
+由于 Vulkan 把分配的责任转移给了驱动，因此“对某种类型（`vk::DescriptorType::eCombinedImageSampler` 等）只分配创建描述符池时相应 `descriptorCount` 成员所声明的数量”不再是一项硬性要求。
+不过这仍然是最佳实践，而且将来如果你启用了 https://vulkan.lunarg.com/doc/view/latest/windows/best_practices.html[最佳实践验证]，`VK_LAYER_KHRONOS_validation` 会针对这类问题给出警告。
+
+最后一步，把实际的图像和采样器资源绑定到描述符集中的描述符上。
+打开 `createDescriptorSets` 函数。
+
+[,c++]
+----
+for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+{
+    vk::DescriptorBufferInfo bufferInfo{.buffer = uniformBuffers[i], .offset = 0, .range = sizeof(UniformBufferObject)};
+    vk::DescriptorImageInfo  imageInfo{.sampler = textureSampler, .imageView = textureImageView, .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal};
+
+    ...
+}
+----
+
+组合图像采样器所需的资源必须在 `vk::DescriptorImageInfo` 结构体中指定，正如统一缓冲区描述符的缓冲区资源要在 `vk::DescriptorBufferInfo` 结构体中指定一样。
+上一章的各个对象就在这里汇合。
+
+[,c++]
+----
+std::array<vk::WriteDescriptorSet, 2> descriptorWrites{{{.dstSet          = descriptorSets[i],
+                                                         .dstBinding      = 0,
+                                                         .dstArrayElement = 0,
+                                                         .descriptorCount = 1,
+                                                         .descriptorType  = vk::DescriptorType::eUniformBuffer,
+                                                         .pBufferInfo     = &bufferInfo},
+                                                        {.dstSet          = descriptorSets[i],
+                                                         .dstBinding      = 1,
+                                                         .dstArrayElement = 0,
+                                                         .descriptorCount = 1,
+                                                         .descriptorType  = vk::DescriptorType::eCombinedImageSampler,
+                                                         .pImageInfo      = &imageInfo}}};
+device.updateDescriptorSets(descriptorWrites, {});
+----
+
+和缓冲区一样，也要用这份图像信息更新描述符。
+这次用的是 `pImageInfo` 数组，而不是 `pBufferInfo`。
+现在描述符已经可以被着色器使用了！
+
+== 纹理坐标
+
+纹理映射还缺一个关键要素：每个顶点实际的纹理坐标，通常称为“uv 坐标”。
+纹理坐标决定了图像究竟如何映射到几何体上。
+
+[,c++]
+----
+struct Vertex
+{
+    glm::vec2 pos;
+    glm::vec3 color;
+    glm::vec2 texCoord;
+
+    static vk::VertexInputBindingDescription getBindingDescription()
+    {
+        return { 0, sizeof(Vertex), vk::VertexInputRate::eVertex };
+    }
+
+    static std::array<vk::VertexInputAttributeDescription, 3> getAttributeDescriptions()
+    {
+        return {{{.location = 0, .binding = 0, .format = vk::Format::eR32G32Sfloat, .offset = offsetof(Vertex, pos)},
+		         {.location = 1, .binding = 0, .format = vk::Format::eR32G32B32Sfloat, .offset = offsetof(Vertex, color)},
+		         {.location = 2, .binding = 0, .format = vk::Format::eR32G32Sfloat, .offset = offsetof(Vertex, texCoord)}}};
+    }
+};
+----
+
+修改 `Vertex` 结构体，加入一个 `vec2` 存放纹理坐标。
+还要记得添加一个 `vk::VertexInputAttributeDescription`，这样才能在顶点着色器中把纹理坐标作为输入来访问。
+这是把它们传给片元着色器、在正方形表面做插值所必需的。
+颜色值只在着色器章节末尾的附加示例中用到，显示图像并不需要它，可以删掉。
+只要记得同时更新 `vertices` 数组和相应的着色器即可。
+
+[,c++]
+----
+const std::vector<Vertex> vertices = {
+    {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
+    {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+    {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
+    {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}}
+};
+----
+
+本教程直接用从左上角 `0, 0` 到右下角 `1, 1` 的坐标，把纹理铺满正方形。
+不妨试试其他坐标。
+试着使用小于 `0` 或大于 `1` 的坐标，看看寻址模式的实际效果！
+
+== 着色器
+
+最后一步是修改着色器，从纹理中采样颜色。
+先修改顶点着色器，把纹理坐标传递给片元着色器：
+
+[,slang]
+----
+struct VSInput {
+    float2 inPos;
+    float3 inColor;
+    float2 inTexCoord;
+};
+
+struct UniformBuffer {
+    float4x4 model;
+    float4x4 view;
+    float4x4 proj;
+};
+ConstantBuffer<UniformBuffer> ubo;
+
+struct VSOutput
+{
+    float4 pos : SV_Position;
+    float3 fragColor;
+    float2 fragTexCoord;
+};
+
+[shader("vertex")]
+VSOutput vertMain(VSInput input) {
+    VSOutput output;
+    output.pos = mul(ubo.proj, mul(ubo.view, mul(ubo.model, float4(input.inPos, 0.0, 1.0))));
+    output.fragColor = input.inColor;
+    output.fragTexCoord = input.inTexCoord;
+    return output;
+}
+
+[shader("fragment")]
+float4 fragMain(VSOutput vertIn) : SV_TARGET {
+   return float4(vertIn.fragTexCoord, 0.0, 1.0);
+}
+----
+
+你应该会看到类似下图的结果。
+记得重新编译着色器！
+
+image::/images/texcoord_visualization.png[]
+
+绿色通道表示水平坐标，红色通道表示垂直坐标。
+黑色和黄色的角说明纹理坐标确实从 `0, 0` 到 `1, 1` 在正方形上正确插值。
+在没有更好手段的时候，用颜色可视化数据就相当于着色器编程里的 `printf` 调试！
+
+在 Slang 中，采样器就代表组合图像采样器描述符。
+在片元着色器中添加对它的引用：
+
+[,slang]
+----
+Sampler2D texture;
+----
+
+对于其他类型的图像，有等价的 `sampler1D` 和 `sampler3D` 类型。
+注意这里要使用正确的绑定点。
+
+[,slang]
+----
+[shader("fragment")]
+float4 fragMain(VSOutput vertIn) : SV_TARGET {
+   return texture.Sample(vertIn.fragTexCoord);
+}
+----
+
+纹理通过内置的 `texture` 函数采样。
+它接收采样器和坐标作为参数。
+采样器会在后台自动处理过滤和变换。
+现在运行应用，应该能看到正方形上贴好了纹理：
+
+image::/images/texture_on_square.png[]
+
+可以试着把纹理坐标放大到大于 `1` 的值，观察寻址模式的表现。
+例如在使用 `VK_SAMPLER_ADDRESS_MODE_REPEAT` 时，下面的片元着色器会产生下图所示的结果：
+
+[,glsl]
+----
+[shader("fragment")]
+float4 fragMain(VSOutput vertIn) : SV_TARGET {
+   return texture.Sample(vertIn.fragTexCoord * 2.0);
+}
+----
+
+image::/images/texture_on_square_repeated.png[]
+
+也可以用顶点颜色来调整纹理颜色：
+
+[,slang]
+----
+[shader("fragment")]
+float4 fragMain(VSOutput vertIn) : SV_TARGET {
+   return float4(vertIn.fragColor * texture.Sample(vertIn.fragTexCoord).rgb, 1.0);
+}
+----
+
+这里我把 RGB 通道和 alpha 通道分开处理，以免连 alpha 通道也被缩放。
+
+image::/images/texture_on_square_colorized.png[]
+
+现在你已经知道如何在着色器中访问图像了！
+如果配合那些同时也会被写入帧缓冲的图像，这是一种非常强大的技术。
+你可以把这些图像当作输入，实现后期处理、3D 世界中的相机画面等炫酷效果。
+
+在 xref:07_Depth_buffering.adoc[下一章]中，我们会学习如何加入深度缓冲，以便正确地排序物体。
+
+link:/attachments/26_texture_mapping.cpp[C{pp} 代码] /
+link:/attachments/26_shader_textures.slang[slang 着色器] /
+link:/attachments/26_shader_textures.vert[GLSL 顶点着色器] /
+link:/attachments/26_shader_textures.frag[GLSL 片元着色器]

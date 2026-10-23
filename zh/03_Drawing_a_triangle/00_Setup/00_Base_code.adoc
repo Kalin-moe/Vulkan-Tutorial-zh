@@ -1,0 +1,295 @@
+:pp: {plus}{plus}
+
+= 基础代码
+
+== Vulkan-Hpp 与指定初始化器
+
+NOTE: 我们将使用 C++ 20 引入的指定初始化器（designated initializer）。
+默认情况下，Vulkan-Hpp 使用另一种初始化方式，我们需要借助 `VULKAN_HPP_NO_STRUCT_CONSTRUCTORS` 宏显式启用这种写法。
+
+这样能更清楚地表达所依赖的结构体中每个选项分别是做什么用的。
+本教程中，这个宏定义在 xref:../../02_Development_environment.adoc#cmake[CMake 构建配置] 里。
+
+如果你用别的构建配置，或者想从零开始写代码，就需要在包含 Vulkan-Hpp 头文件之前手动定义它，像这样：
+[,c++]
+----
+#define VULKAN_HPP_NO_STRUCT_CONSTRUCTORS
+#include <vulkan/vulkan.hpp>
+// 或
+#include <vulkan/vulkan_raii.hpp>
+----
+
+== 总体结构
+
+上一章你已经建好了一个配置齐全的 Vulkan 项目，并用示例代码做了测试。
+这一章我们从零开始，使用下面的代码：
+
+[,c++]
+----
+#if defined(__INTELLISENSE__) || !defined(USE_CPP20_MODULES)
+#include <vulkan/vulkan_raii.hpp>
+#else
+import vulkan_hpp;
+#endif
+#include <GLFW/glfw3.h>
+
+#include <iostream>
+#include <stdexcept>
+#include <cstdlib>
+
+class HelloTriangleApplication {
+----
+
+`#if defined(\\__INTELLISENSE__) || !defined(USE_CPP20_MODULES)` 这一段在两种引入 Vulkan-Hpp API 的方式之间做选择，两者提供的函数、结构体和枚举完全相同。
+默认情况下我们包含传统的 `<vulkan/vulkan_raii.hpp>` 头文件。
+如果启用了 C{pp}20 模块（`-DENABLE_CPP20_MODULE=ON`），CMake 会定义 `USE_CPP20_MODULES`，代码就改用 `import vulkan_hpp;`。
+无论哪种方式，Visual Studio 和 VS Code 的 IntelliSense 引擎目前都不理解模块的 `import`，即使代码能正常编译也会把它标为错误。
+因此，只要定义了 `\\__INTELLISENSE__`（IntelliSense 自己在分析代码时会定义它），或者完全关闭了模块，我们就退回使用头文件。
+
+[,c++]
+----
+public:
+    void run() {
+        initVulkan();
+        mainLoop();
+        cleanup();
+    }
+
+private:
+    void initVulkan() {
+
+    }
+
+    void mainLoop() {
+
+    }
+
+    void cleanup() {
+
+    }
+};
+
+int main()
+{
+    try
+    {
+        HelloTriangleApplication app;
+        app.run();
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << e.what() << std::endl;
+        return EXIT_FAILURE;
+    }
+
+    return EXIT_SUCCESS;
+}
+----
+
+包含 `stdexcept` 和 `iostream` 头文件是为了报告和传播错误。
+`cstdlib` 头文件提供 `EXIT_SUCCESS` 和 `EXIT_FAILURE` 宏。
+
+程序本身被包在一个类里：我们把 Vulkan 对象保存为私有类成员，并为每类对象的初始化各加一个函数，由 `initVulkan` 函数调用。
+一切就绪后，程序进入主循环开始渲染帧。
+稍后我们会把 `mainLoop` 函数补成一个循环，一直迭代到窗口关闭。
+窗口关闭、`mainLoop` 返回后，`cleanup` 函数会负责释放用过的资源。
+
+如果执行过程中出现任何致命错误，我们会抛出带有说明信息的 `std::runtime_error` 异常，它会一路传回 `main` 函数并打印到命令行。
+为了也能处理各种标准异常类型，我们捕获更通用的 `std::exception`。
+不久就会遇到一个例子：发现某个必需的扩展不被支持。
+
+接下来的几乎每一章都会新增一个由 `initVulkan` 调用的函数，并往私有类成员里增添一个或多个新的 Vulkan 对象，这些对象最后需要在 `cleanup` 中释放。
+
+== 资源管理
+
+就像用 `malloc` 分配的每块内存都要调用 `free` 释放一样，我们创建的每个 Vulkan 对象在不再需要时都必须显式销毁。
+在 c{pp} 中，可以用 https://en.wikipedia.org/wiki/Resource_Acquisition_Is_Initialization[RAII] 或 `<memory>` 头文件提供的智能指针来实现自动资源管理。
+本教程希望让 Vulkan 更易上手，并展示现代的 Vulkan 编程方式。
+教程不仅会使用 RAII，还会尽量演示最新的方法和扩展，希望这能让用 Vulkan 变成一件愉快的事。
+我们固然喜欢跟底层图形 API 打交道，但也不该把学习的门槛定得太高。
+在合适的地方，我们会讨论释放资源时的资源管理考量。
+不过就本教程而言，我们会证明：用一个基本的析构函数就能把善后工作做得相当好。
+
+Vulkan 对象要么用 `vkCreateXXX` 这类函数直接创建，要么通过另一个对象用 `vkAllocateXXX` 这类函数分配。
+确认某个对象在任何地方都不再使用之后，需要用对应的 `vkDestroyXXX` 和 `vkFreeXXX` 销毁它。
+这些函数的参数随对象类型不同而有所变化，但有一个参数是所有函数共有的：`pAllocator`。
+这是一个可选参数，用于为自定义内存分配器指定回调。
+本教程会忽略这个参数，始终传入 `nullptr`。
+
+使用 Vulkan-Hpp 的 RAII 模块，我们可以把 `vkCreateXXX`、`vkAllocateXXX`、`vkDestroyXXX` 和 `vkFreeXXX` 都交给库来打理，所以像这样的一段代码：
+
+[,c++]
+----
+VkInstance instance;
+VkApplicationInfo appInfo{};
+appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+appInfo.pApplicationName = "Hello Triangle";
+appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+appInfo.pEngineName = "No Engine";
+appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+appInfo.apiVersion = VK_API_VERSION_1_0;
+
+VkInstanceCreateInfo createInfo{};
+createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+createInfo.pApplicationInfo = &appInfo;
+createInfo.enabledExtensionCount = 0;
+createInfo.ppEnabledExtensionNames = nullptr;
+createInfo.enabledLayerCount = 0;
+createInfo.ppEnabledLayerNames = nullptr;
+
+if (vkCreateInstance(&createInfo, nullptr, &instance) != VK_SUCCESS) {
+    throw std::runtime_error("failed to create instance!");
+}
+
+vkDestroyInstance(instance, nullptr);
+----
+
+可以直接替换成下面这样：
+
+[,c++]
+----
+constexpr vk::ApplicationInfo appInfo{.pApplicationName   = "Hello Triangle",
+                                      .applicationVersion = VK_MAKE_VERSION( 1, 0, 0 ),
+                                      .pEngineName        = "No Engine",
+                                      .engineVersion      = VK_MAKE_VERSION( 1, 0, 0 ),
+                                      .apiVersion         = vk::ApiVersion14};
+
+vk::InstanceCreateInfo createInfo{
+    .pApplicationInfo = &appInfo
+};
+
+instance = vk::raii::Instance(context, createInfo);
+----
+
+== 集成 GLFW
+
+如果只做离屏渲染，完全不创建窗口 Vulkan 也能正常工作，但能真正显示出东西要有趣得多！
+先添加 GLFW：注意，我们会继续使用 GLFW_INCLUDE_VULKAN，因为 GLFW 要获取 Vulkan 窗口表面，而它直接使用 C 版表面。
+除了这件事，用 GLFW_INCLUDE_NONE 或干脆不做这项指定，其余一切也都能正常工作。
+
+[,c++]
+----
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+----
+
+这样 GLFW 会包含自己的定义，并顺带自动加载 Vulkan 的 C 头文件。
+新增 `initWindow` 函数，并在 `run` 函数中把它排在其他调用之前。
+我们会用这个函数初始化 GLFW 并创建窗口。
+
+[,c++]
+----
+void run() {
+    initWindow();
+    initVulkan();
+    mainLoop();
+    cleanup();
+}
+
+private:
+    void initWindow() {
+    }
+----
+
+`initWindow` 中的第一个调用应该是 `glfwInit()`，它初始化 GLFW 库。
+由于 GLFW 最初是为创建 OpenGL 上下文而设计的，我们需要用后面这个调用告诉它不要创建 OpenGL 上下文：
+
+[,c++]
+----
+glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+----
+
+处理窗口尺寸改变需要格外小心，这部分留到后面再看，现在先用另一个窗口提示调用把它禁用：
+
+[,c++]
+----
+glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+----
+
+现在只剩创建实际的窗口了。新增一个 `GLFWwindow* window;` 私有类成员来保存它的引用：
+
+[,c++]
+----
+private:
+    GLFWwindow *window = nullptr;
+----
+
+再用下面的代码初始化窗口：
+
+[,c++]
+----
+window = glfwCreateWindow(800, 600, "Vulkan", nullptr, nullptr);
+----
+
+前三个参数指定窗口的宽度、高度和标题。
+第四个参数可以让你选择在哪个显示器上打开窗口，最后一个参数只与 OpenGL 有关。
+
+与其把宽高数字硬编码，不如改用常量，因为后面还会多次用到这些值。
+我在 `HelloTriangleApplication` 类定义的上方加了下面几行：
+
+[,c++]
+----
+constexpr uint32_t WIDTH = 800;
+constexpr uint32_t HEIGHT = 600;
+----
+
+并把创建窗口的调用改成
+
+[,c++]
+----
+window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
+----
+
+现在你的 `initWindow` 函数应该长这样：
+
+[,c++]
+----
+void initWindow() {
+    glfwInit();
+
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+
+    window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
+}
+----
+
+为了让应用一直运行到出错或窗口被关闭，我们需要在 `mainLoop` 函数里加一个事件循环，如下所示：
+
+[,c++]
+----
+void mainLoop() {
+    while (!glfwWindowShouldClose(window)) {
+        glfwPollEvents();
+    }
+}
+----
+
+这段代码应该不难理解。
+它不断循环，检查点击 X 按钮之类的事件，直到用户关闭窗口。
+稍后我们还会在这个循环里调用渲染单帧的函数。
+
+窗口关闭后，我们需要销毁它并终止 GLFW 本身，以此清理资源。
+这就是我们的第一段 `cleanup` 代码：
+
+[,c++]
+----
+void cleanup() {
+    glfwDestroyWindow(window);
+
+    glfwTerminate();
+}
+----
+
+注意，在本教程中这是最后一次需要往 cleanup() 函数里添加内容。
+这段代码以后不必再改动。
+
+现在运行程序，应该会看到一个标题为 `Vulkan` 的窗口，直到你关闭窗口终止应用。
+
+NOTE: 在 Wayland 上，合成器（compositor）在窗口第一次提交缓冲区之前不会真正映射（显示）窗口。
+由于我们还没创建交换链、也没画任何东西，在 Wayland 下运行时此刻看不到窗口不必惊讶——这是正常现象，等教程后面讲到呈现图像时窗口自然会出现。
+这是 Wayland 特有的行为；如上所述，X11 会立刻显示窗口。
+
+现在 Vulkan 应用的骨架已经有了，接下来就 xref:./01_Instance.adoc[创建第一个 Vulkan 对象] 吧！
+
+link:/attachments/00_base_code.cpp[C{pp} 代码]

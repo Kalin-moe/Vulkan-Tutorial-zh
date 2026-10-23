@@ -1,5 +1,13 @@
 *.html
+# 生成器模板本身是 .html，需要入库（生成出来的页面仍然忽略）
+!config/templates/*.html
 ads.txt
+
+# 站点生成器（site/ + build-site.js）：依赖与本地缓存
+node_modules/
+.npm/
+.pnpm-store/
+dist/
 
 **/_out/*
 **/.vscode/*

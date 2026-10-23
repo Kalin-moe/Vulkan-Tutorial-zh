@@ -1,0 +1,341 @@
+:pp: {plus}{plus}
+
+= 命令缓冲区
+
+Vulkan 中的命令（例如绘制操作和内存传输）并不是用函数调用直接执行的。
+你必须把想要执行的所有操作记录到命令缓冲区对象中。
+这样做的好处是：当你准备好告诉 Vulkan 要做什么时，所有命令会一起提交。
+由于所有命令同时可用，Vulkan 能更高效地处理它们。
+此外，如有需要，这也让命令记录可以在多个线程中并行进行。
+
+== 命令池
+
+创建命令缓冲区之前，必须先创建命令池。
+命令池管理用于存储命令缓冲区的内存，命令缓冲区正是从命令池中分配的。
+添加一个新的类成员来保存 `vk::raii::CommandPool`：
+
+[,c++]
+----
+vk::raii::CommandPool commandPool = nullptr;
+----
+
+然后新建 `createCommandPool` 函数，并在图形管线创建完成后从 `initVulkan` 中调用它。
+
+[,c++]
+----
+void initVulkan()
+{
+    createInstance();
+    setupDebugMessenger();
+    createSurface();
+    pickPhysicalDevice();
+    createLogicalDevice();
+    createSwapChain();
+    createImageViews();
+    createGraphicsPipeline();
+    createCommandPool();
+}
+
+...
+
+void createCommandPool()
+{
+}
+----
+
+命令池的创建只需要两个参数：
+
+[,c++]
+----
+vk::CommandPoolCreateInfo poolInfo{.flags            = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+                                   .queueFamilyIndex = queueIndex};
+----
+
+命令池可以设置两种标志：
+
+* `vk::CommandPoolCreateFlagBits::eTransient`：提示命令缓冲区会非常频繁地用新命令重新记录（可能改变内存分配行为）
+* `vk::CommandPoolCreateFlagBits::eResetCommandBuffer`：允许单独重新记录每个命令缓冲区；没有这个标志时，所有命令缓冲区必须一起重置
+
+由于每一帧都要记录命令缓冲区，我们希望可以重置它并在其上重新记录。
+因此，命令池要设置 `vk::CommandPoolCreateFlagBits::eResetCommandBuffer` 标志位。
+
+NOTE: 在前面的章节中，图形队列族索引（`queueIndex`）是一个局部变量。从本章开始，多个地方都会用到这个索引，因此它已被改为应用类的成员。
+
+命令缓冲区通过提交到设备的某个队列来执行，例如之前获取的图形队列和呈现队列。
+每个命令池只能分配要提交到同一类队列的命令缓冲区。
+我们要记录的是绘制命令，所以选择了图形队列族。
+
+[,c++]
+----
+commandPool = vk::raii::CommandPool(device, poolInfo);
+----
+
+用 `vk::raii::CommandPool` 构造函数完成命令池的创建。
+它没有任何特殊参数。
+整个程序都会用其中记录的命令在屏幕上绘制内容。
+
+== 命令缓冲区分配
+
+现在可以开始分配命令缓冲区了。
+
+添加一个 `vk::raii::CommandBuffer` 对象作为类成员。
+命令池销毁时，其中的命令缓冲区会自动释放，因此不需要显式清理。
+
+[,c++]
+----
+vk::raii::CommandBuffer commandBuffer = nullptr;
+----
+
+接下来编写 `createCommandBuffer` 函数，从命令池中分配一个命令缓冲区。
+
+[,c++]
+----
+void initVulkan()
+{
+    createInstance();
+    setupDebugMessenger();
+    createSurface();
+    pickPhysicalDevice();
+    createLogicalDevice();
+    createSwapChain();
+    createImageViews();
+    createGraphicsPipeline();
+    createCommandPool();
+    createCommandBuffer();
+}
+
+...
+
+void createCommandBuffer()
+{
+}
+----
+
+命令缓冲区通过 `vk::raii::CommandBuffers` 构造函数分配，它接收一个 `vk::CommandBufferAllocateInfo` 结构体作为参数，用来指定命令池和要分配的缓冲区数量：
+
+[,c++]
+----
+vk::CommandBufferAllocateInfo allocInfo{ .commandPool = commandPool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 1 };
+
+commandBuffer = std::move(vk::raii::CommandBuffers(device, allocInfo).front());
+----
+
+`level` 参数指定分配出的命令缓冲区是一级还是二级命令缓冲区。
+
+* `vk::CommandBufferLevel::ePrimary`：可以提交到队列执行，但不能被其他命令缓冲区调用。
+* `vk::CommandBufferLevel::eSecondary`：不能直接提交，但可以被一级命令缓冲区调用。
+
+这里用不到二级命令缓冲区的功能，但可以想见，它在复用一级命令缓冲区中的常见操作时很有用。
+
+因为只分配一个命令缓冲区，`commandBufferCount` 参数就是 1。
+`vk::raii::CommandBuffers` 构造函数生成的是 `std::vector<vk::raii::CommandBuffer>`，而这里只需要一个，所以把它从 vector 中移动到单个变量里。
+
+== 命令缓冲区记录
+
+接下来编写 `recordCommandBuffer` 函数，把要执行的命令写入命令缓冲区。
+所用的 `vk::raii::CommandBuffer` 会作为参数传入，同时传入当前要写入的交换链图像索引。
+
+[,c++]
+----
+void recordCommandBuffer(uint32_t imageIndex)
+{
+}
+----
+
+记录命令缓冲区时，总是先调用 `vk::raii::CommandBuffer::begin`，并传入一个小的 `vk::CommandBufferBeginInfo` 结构体，用来说明这个命令缓冲区的使用细节。
+
+[,c++]
+----
+commandBuffer.begin({});
+----
+
+`vk::CommandBufferBeginInfo` 的 `flags` 成员说明命令缓冲区的用法。
+可用的值有：
+
+* `vk::CommandBufferUsageFlagBits::eOneTimeSubmit`：命令缓冲区在执行一次之后会立即被重新记录。
+* `vk::CommandBufferUsageFlagBits::eRenderPassContinue`：这是一个二级命令缓冲区，其内容将完全位于单个渲染通道内。
+* `vk::CommandBufferUsageFlagBits::eSimultaneousUse`：命令缓冲区可以在仍处于待执行状态时再次提交。
+
+目前这些标志一个都不适用。
+
+`vk::CommandBufferBeginInfo` 的 `pInheritanceInfo` 成员只对二级命令缓冲区有意义。
+它指定从调用它的一级命令缓冲区继承哪些状态。
+
+如果命令缓冲区已经记录过一次，那么调用 `vk::raii::CommandBuffer::begin` 会隐式重置它。
+无法在之后向缓冲区追加命令。
+
+== 图像布局转换
+
+开始向图像渲染之前，需要先把它的布局转换为适合渲染的布局。在 Vulkan 中，图像可以处于针对不同操作优化的不同布局。例如，图像可以处于最适合呈现到屏幕的布局，也可以处于最适合作为颜色附件使用的布局。
+
+这里用一个管线屏障把图像布局从 `vk::ImageLayout::eUndefined` 转换为 `vk::ImageLayout::eColorAttachmentOptimal`：
+
+[,c++]
+----
+void transition_image_layout(
+	    uint32_t                imageIndex,
+	    vk::ImageLayout         old_layout,
+	    vk::ImageLayout         new_layout,
+	    vk::AccessFlags2        src_access_mask,
+	    vk::AccessFlags2        dst_access_mask,
+	    vk::PipelineStageFlags2 src_stage_mask,
+	    vk::PipelineStageFlags2 dst_stage_mask)
+{
+		vk::ImageMemoryBarrier2 barrier = {
+		    .srcStageMask        = src_stage_mask,
+		    .srcAccessMask       = src_access_mask,
+		    .dstStageMask        = dst_stage_mask,
+		    .dstAccessMask       = dst_access_mask,
+		    .oldLayout           = old_layout,
+		    .newLayout           = new_layout,
+		    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		    .image               = swapChainImages[imageIndex],
+		    .subresourceRange    = {
+		           .aspectMask     = vk::ImageAspectFlagBits::eColor,
+		           .baseMipLevel   = 0,
+		           .levelCount     = 1,
+		           .baseArrayLayer = 0,
+		           .layerCount     = 1}};
+		vk::DependencyInfo dependency_info = {
+		    .dependencyFlags         = {},
+		    .imageMemoryBarrierCount = 1,
+		    .pImageMemoryBarriers    = &barrier};
+    commandBuffer.pipelineBarrier2(dependency_info);
+}
+----
+
+这个函数将在渲染前后用于转换图像布局。
+
+== 开始动态渲染
+
+使用动态渲染时，不需要创建渲染通道或帧缓冲。
+改为在开始渲染时直接指定附件：
+
+[,c++]
+----
+// 开始渲染前，把交换链图像转换为 vk::ImageLayout::eColorAttachmentOptimal
+transition_image_layout(
+    imageIndex,
+    vk::ImageLayout::eUndefined,
+    vk::ImageLayout::eColorAttachmentOptimal,
+    {},                                                        // srcAccessMask（无需等待之前的操作）
+    vk::AccessFlagBits2::eColorAttachmentWrite,                // dstAccessMask
+    vk::PipelineStageFlagBits2::eColorAttachmentOutput,        // srcStage
+    vk::PipelineStageFlagBits2::eColorAttachmentOutput         // dstStage
+);
+----
+
+首先把图像布局转换为 `vk::ImageLayout::eColorAttachmentOptimal`。接着设置颜色附件：
+
+[,c++]
+----
+vk::ClearValue              clearColor     = vk::ClearColorValue(0.0f, 0.0f, 0.0f, 1.0f);
+vk::RenderingAttachmentInfo attachmentInfo = {
+    .imageView   = swapChainImageViews[imageIndex],
+    .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+    .loadOp      = vk::AttachmentLoadOp::eClear,
+    .storeOp     = vk::AttachmentStoreOp::eStore,
+    .clearValue  = clearColor};
+----
+
+`imageView` 参数指定渲染到哪个图像视图，`imageLayout` 参数指定渲染期间图像所处的布局。`loadOp` 参数指定渲染前如何处理图像，`storeOp` 参数指定渲染后如何处理图像。这里用 `vk::AttachmentLoadOp::eClear` 在渲染前把图像清为黑色，用 `vk::AttachmentStoreOp::eStore` 保存渲染结果以备后用。
+
+接着设置渲染信息：
+
+[,c++]
+----
+vk::RenderingInfo renderingInfo = {
+    .renderArea           = {.offset = {0, 0}, .extent = swapChainExtent},
+    .layerCount           = 1,
+    .colorAttachmentCount = 1,
+    .pColorAttachments    = &attachmentInfo};
+----
+
+`renderArea` 参数定义渲染区域的大小，类似渲染通道中的渲染区域。`layerCount` 参数指定渲染的层数，对于非分层图像为 1。`colorAttachmentCount` 和 `pColorAttachments` 参数指定要渲染到的颜色附件。
+
+现在可以开始渲染了：
+
+[,c++]
+----
+commandBuffer.beginRendering(renderingInfo);
+----
+
+所有记录命令的函数都返回 `void`，因此在记录完成之前不会有任何错误处理。
+
+`beginRendering` 命令的参数就是刚才设置的渲染信息，它指定要渲染到的附件和渲染区域。
+
+== 基本绘制命令
+
+现在可以绑定图形管线：
+
+[,c++]
+----
+commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *graphicsPipeline);
+----
+
+第一个参数指定管线对象是图形管线还是计算管线。
+至此，已经告诉 Vulkan 要在图形管线中执行哪些操作，以及片元着色器要使用哪个附件。
+
+如 xref:../02_Graphics_pipeline_basics/02_Fixed_functions.adoc#dynamic-state[固定功能章节]所述，我们把这条管线的视口和裁剪状态指定为动态。
+因此需要在命令缓冲区中发出绘制命令之前设置它们：
+
+[,c++]
+----
+commandBuffer.setViewport(0, vk::Viewport(0.0f, 0.0f, static_cast<float>(swapChainExtent.width), static_cast<float>(swapChainExtent.height), 0.0f, 1.0f));
+commandBuffer.setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), swapChainExtent));
+----
+
+现在可以发出绘制三角形的命令了：
+
+[,c++]
+----
+commandBuffer.draw(3, 1, 0, 0);
+----
+
+真正调用 `vk::raii::CommandBuffer::draw` 时的代码显得有些平淡，但它之所以这么简单，是因为前面已经指定了所有信息。
+它有以下参数：
+
+* `vertexCount`：虽然没有顶点缓冲区，但技术上仍然有 3 个顶点要绘制。
+* `instanceCount`：用于实例化渲染，不做实例化时填 `1`。
+* `firstVertex`：用作顶点缓冲区中的偏移，定义 `SV_VertexId` 的最小值。
+* `firstInstance`：用作实例化渲染的偏移，定义 `SV_InstanceID` 的最小值。
+
+== 收尾
+
+现在可以结束渲染：
+
+[,c++]
+----
+commandBuffer.endRendering();
+----
+
+渲染结束后，需要把图像布局转换回 `vk::ImageLayout::ePresentSrcKHR`，这样才能呈现到屏幕：
+
+[,c++]
+----
+// 渲染结束后，把交换链图像转换为 vk::ImageLayout::ePresentSrcKHR
+transition_image_layout(
+    imageIndex,
+    vk::ImageLayout::eColorAttachmentOptimal,
+    vk::ImageLayout::ePresentSrcKHR,
+    vk::AccessFlagBits2::eColorAttachmentWrite,             // srcAccessMask
+    {},                                                     // dstAccessMask
+    vk::PipelineStageFlagBits2::eColorAttachmentOutput,     // srcStage
+    vk::PipelineStageFlagBits2::eBottomOfPipe               // dstStage
+);
+----
+
+命令缓冲区记录到此完成：
+
+[,c++]
+----
+commandBuffer.end();
+----
+
+在 xref:./02_Rendering_and_presentation.adoc[下一章]中，我们会编写主循环的代码：从交换链获取图像，记录并执行命令缓冲区，然后把绘制完成的图像交回交换链。
+
+link:/attachments/14_command_buffers.cpp[C{pp} 代码] /
+link:/attachments/09_shader_base.slang[Slang 着色器] /
+link:/attachments/09_shader_base.vert[GLSL 顶点着色器] /
+link:/attachments/09_shader_base.frag[GLSL 片元着色器]

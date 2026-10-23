@@ -1,0 +1,87 @@
+:pp: {plus}{plus}
+
+= 动态渲染
+
+在较早的 Vulkan 版本中，要把图像视图绑定到渲染通道上，必须先创建帧缓冲。不过在 Vulkan 1.3 引入动态渲染之后，就可以直接向图像视图渲染，而无需创建帧缓冲或渲染通道。
+
+== 动态渲染简介
+
+动态渲染免去了渲染通道和帧缓冲对象，从而简化了渲染流程。改为在开始渲染时直接指定颜色、深度和模板附件。
+
+这种做法有几个好处：
+- 代码更简单，需要管理的对象更少
+- 渲染过程中更换附件更灵活
+- 与现代渲染技术兼容性更好
+
+下面看看实际怎么做。我们会用 `vk::RenderingAttachmentInfo` 和 `vk::RenderingInfo` 结构体来指定附件和渲染参数。
+
+== 使用动态渲染记录命令缓冲区
+
+下一章会创建命令缓冲区并记录渲染命令。这里先预览动态渲染的用法：
+
+[,c++]
+----
+void recordCommandBuffer(uint32_t imageIndex)
+{
+    commandBuffer.begin({});
+
+    // 转换图像布局以便渲染
+    transition_image_layout(
+        imageIndex,
+        vk::ImageLayout::eUndefined,
+        vk::ImageLayout::eColorAttachmentOptimal,
+        {},
+        vk::AccessFlagBits2::eColorAttachmentWrite,
+        vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+        vk::PipelineStageFlagBits2::eColorAttachmentOutput
+    );
+
+    // 设置颜色附件
+    vk::ClearValue clearColor = vk::ClearColorValue(0.0f, 0.0f, 0.0f, 1.0f);
+    vk::RenderingAttachmentInfo attachmentInfo = {
+		    .imageView   = swapChainImageViews[imageIndex],
+		    .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+		    .loadOp      = vk::AttachmentLoadOp::eClear,
+		    .storeOp     = vk::AttachmentStoreOp::eStore,
+		    .clearValue  = clearColor};
+
+    // 设置渲染信息
+    vk::RenderingInfo renderingInfo = {
+		    .renderArea           = {.offset = {0, 0}, .extent = swapChainExtent},
+		    .layerCount           = 1,
+		    .colorAttachmentCount = 1,
+		    .pColorAttachments    = &attachmentInfo};
+
+    // 开始渲染
+    commandBuffer.beginRendering(renderingInfo);
+
+    // 渲染命令将放在这里
+
+    // 结束渲染
+    commandBuffer.endRendering();
+
+    // 转换图像布局以便呈现
+    transition_image_layout(
+        imageIndex,
+        vk::ImageLayout::eColorAttachmentOptimal,
+        vk::ImageLayout::ePresentSrcKHR,
+        vk::AccessFlagBits2::eColorAttachmentWrite,
+        {},
+        vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+        vk::PipelineStageFlagBits2::eBottomOfPipe
+    );
+
+    commandBuffer.end();
+}
+----
+
+可以看到，我们在 `vk::RenderingAttachmentInfo` 结构体中直接指定要渲染到的图像视图，同时也指定加载和存储操作，这与在渲染通道中的做法类似。`vk::RenderingInfo` 结构体则把这些信息与其他渲染参数组合起来。
+
+采用这种做法，就不必创建帧缓冲或渲染通道，代码因此更简单，也更灵活。
+
+在 xref:./01_Command_buffers.adoc[下一章]中，我们会创建命令缓冲区，并用动态渲染写出第一批真正的绘制命令。
+
+link:/attachments/14_command_buffers.cpp[C{pp} 代码] /
+link:/attachments/09_shader_base.slang[Slang 着色器] /
+link:/attachments/09_shader_base.vert[GLSL 顶点着色器] /
+link:/attachments/09_shader_base.frag[GLSL 片元着色器]
