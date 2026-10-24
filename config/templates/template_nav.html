@@ -22,26 +22,30 @@ body { padding: 0; }
 .site-title { font-size: 0.85rem; color: var(--k-text-muted); }
 .gh-link { font-size: 0.85rem; color: var(--k-text-muted); text-decoration: none; }
 .gh-link:hover { color: var(--k-text); text-decoration: underline; }
-.breadcrumb { margin-top: 0.7rem; font-size: 0.85rem; color: var(--k-text-muted); word-break: break-all; }
+.breadcrumb { font-size: 0.85rem; color: var(--k-text-muted); word-break: break-all; }
 .breadcrumb a { color: var(--k-link); text-decoration: none; }
 .breadcrumb a:hover { text-decoration: underline; }
 .breadcrumb .separator { margin: 0 6px; color: var(--k-text-fainter); }
 .global-divider { width: 100%; height: 1px; background: var(--k-border-faint); }
 
-/* ===== 正文 + 右侧目录 ===== */
+/* ===== 正文（居中，与 kalin-web 一致）+ 右侧目录 ===== */
 .page-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 220px;
-  gap: 0 28px;
+  grid-template-columns: 1fr minmax(auto, 780px) 1fr;
+  gap: 0 20px;
   align-items: start;
-  margin-top: 1.5rem;
+  margin-top: 1.25rem;
 }
-.page-grid .markdown-body { max-width: 820px; width: 100%; }
+/* 中列是正文；面包屑、上下章、页脚都跟着它一起居中 */
+.page-grid > * { grid-column: 2; }
+.page-grid .breadcrumb-wrapper { width: 100%; margin-bottom: 1rem; }
+.page-grid .markdown-body { width: 100%; }
 .page-grid .toc-sidebar {
-  grid-column: 2;
-  grid-row: 1;
+  grid-column: 3;
+  grid-row: 1 / 100;
   position: sticky;
   top: 1rem;
+  align-self: start;
   width: 220px;
   font-size: 0.88rem;
   line-height: 1.5;
@@ -74,10 +78,26 @@ body { padding: 0; }
 .toc-body a { color: var(--k-text-soft); text-decoration: none; }
 .toc-body a:hover { text-decoration: underline; }
 
-@media (max-width: 1023px) {
+/* 窄屏放不下「正文 780 + 右侧目录 220」，目录挪到正文上方 */
+@media (max-width: 1199px) {
   .page-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
-  .page-grid .toc-sidebar { grid-column: 1; grid-row: 1; position: static; width: 100%; margin-bottom: 1.2rem; }
-  .page-grid .markdown-body { grid-row: 2; }
+  .page-grid > * { grid-column: 1; }
+  .page-grid .toc-sidebar {
+    grid-column: 1;
+    grid-row: auto;
+    position: static;
+    width: 100%;
+    max-width: 780px;
+    margin: 0 auto 1.2rem;
+  }
+  /* 单列时上下章和页脚也要跟正文同宽、居中，别拉满一整行 */
+  .page-grid .page-nav,
+  .page-grid .site-footer {
+    width: 100%;
+    max-width: 780px;
+    margin-left: auto;
+    margin-right: auto;
+  }
 }
 
 /* ===== 左侧章节导航 ===== */
@@ -256,17 +276,16 @@ body { padding: 0; }
       <a class="gh-link" href="{{repo}}">GitHub</a>
       {{theme_button}}
     </div>
-    <div class="breadcrumb">{{breadcrumb}}</div>
   </header>
   <div class="global-divider"></div>
 
   <div class="page-grid">
+    <div class="breadcrumb-wrapper"><div class="breadcrumb">{{breadcrumb}}</div></div>
     <div class="toc-sidebar" id="tocSidebar">{{toc}}</div>
     <main class="markdown-body">{{content}}</main>
+    {{prev_next}}
+    {{footer}}
   </div>
-
-  {{prev_next}}
-  {{footer}}
 </div>
 
 <script src="/js/theme.js" defer></script>
