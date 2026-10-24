@@ -6,6 +6,7 @@ const cheerio = require('cheerio');
 const { makeHtml, preprocessMath, renderMathPlaceholders } = require('./markdown');
 const { convertAsciidoc, fixXrefPaths } = require('./asciidoc');
 const { generateToc } = require('./navigation');
+const { highlightHtml } = require('./highlight');
 
 function wrapToc(inner) {
   return `<div class="toc-header" id="tocToggle"><span>目录</span><span class="arrow">▶</span></div><div class="toc-body" id="tocBody">${inner}</div>`;
@@ -19,7 +20,7 @@ async function convertDocument(filePath, contentRoot, options = {}) {
   const ext = path.extname(filePath).toLowerCase();
 
   const clean = fixXrefPaths(content, filePath, contentRoot, options.externalFallbackBase || '');
-  const { processedText, formulas } = preprocessMath(clean);
+  const { processedText, formulas } = preprocessMath(clean, { asciidoc: ext === '.adoc' });
 
   let htmlContent;
   if (ext === '.adoc') htmlContent = await convertAsciidoc(processedText, filePath);
@@ -41,6 +42,10 @@ async function convertDocument(filePath, contentRoot, options = {}) {
   }
   // 没有章节或 Asciidoctor 没给目录时，退回到自己从标题里提取。
   if (!tocHtml) tocHtml = generateToc(htmlContent);
+
+  // 语法高亮放在最后：目录和公式都处理完了，这里只碰代码块。
+  // 生成的 span 是纯展示用的，不参与目录/交叉引用。
+  htmlContent = await highlightHtml(htmlContent);
 
   return {
     htmlContent,

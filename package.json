@@ -20,6 +20,7 @@
     "fs-extra": "^11.3.5",
     "glob": "^13.0.6",
     "katex": "^0.17.0",
+    "shiki": "^4.5.0",
     "showdown": "^2.1.0",
     "showdown-footnotes": "^2.1.2"
   },

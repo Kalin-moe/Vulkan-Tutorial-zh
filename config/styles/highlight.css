@@ -1,0 +1,23 @@
+/* ============================================================
+   代码高亮（构建时由 Shiki 生成 token）
+   颜色写在每个 span 的 --shiki-light / --shiki-dark 变量里，
+   这里只负责按当前主题挑一个。深色切换复用 html[data-theme]，
+   不需要第二份高亮 HTML，也不会出现切换时重新渲染的闪动。
+   ============================================================ */
+.markdown-body pre.shiki code,
+.markdown-body pre.shiki span {
+  color: var(--shiki-light);
+}
+
+html[data-theme="dark"] .markdown-body pre.shiki code,
+html[data-theme="dark"] .markdown-body pre.shiki span {
+  color: var(--shiki-dark);
+}
+
+/* JS 被禁用时 data-theme 不会被写入，退回跟随系统偏好 */
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]) .markdown-body pre.shiki code,
+  html:not([data-theme]) .markdown-body pre.shiki span {
+    color: var(--shiki-dark);
+  }
+}

@@ -2,14 +2,19 @@ document.addEventListener('DOMContentLoaded', function () {
   function extractLang(codeEl) {
     const cls = codeEl.className || '';
     const match = cls.match(/language-(\S+)/);
-    if (!match) return '';
-    let lang = match[1].toLowerCase();
+    let lang = match ? match[1].toLowerCase() : '';
+    if (!lang) lang = (codeEl.getAttribute('data-lang') || '').toLowerCase();
+    if (!lang) return '';
     const map = {
-      cpp: 'C++', c: 'C', js: 'JavaScript', ts: 'TypeScript',
+      'c++': 'C++', cpp: 'C++', c: 'C', js: 'JavaScript', ts: 'TypeScript',
       py: 'Python', java: 'Java', html: 'HTML', css: 'CSS',
-      bash: 'Bash', shell: 'Shell', json: 'JSON', xml: 'XML',
+      bash: 'Bash', shell: 'Shell', sh: 'Shell', json: 'JSON', xml: 'XML',
       yaml: 'YAML', sql: 'SQL', go: 'Go', rust: 'Rust',
-      adoc: 'AsciiDoc', md: 'Markdown', plaintext: 'Text'
+      adoc: 'AsciiDoc', md: 'Markdown', plaintext: 'Text',
+      slang: 'Slang', hlsl: 'HLSL', glsl: 'GLSL',
+      cmake: 'CMake', groovy: 'Groovy', batch: 'Batch', bat: 'Batch',
+      ini: 'INI', toml: 'TOML', diff: 'Diff', makefile: 'Makefile',
+      dockerfile: 'Dockerfile', lua: 'Lua', powershell: 'PowerShell'
     };
     return map[lang] || lang.toUpperCase();
   }
