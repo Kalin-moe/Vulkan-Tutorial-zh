@@ -187,7 +187,6 @@ path = [
     "site/**",
     "config/**",
     "js/**",
-    "README.md",
     "package.json",
     "pnpm-lock.yaml",
     "favicon.svg",
