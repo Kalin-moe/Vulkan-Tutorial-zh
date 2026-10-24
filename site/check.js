@@ -8,7 +8,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { JSDOM } = require('jsdom');
+const { JSDOM, VirtualConsole } = require('jsdom');
 const glob = require('glob');
 const { loadSiteConfig } = require('./config');
 const { SOURCE_DIR, IGNORE_DIRS, relativeToSource } = require('./paths');
@@ -58,6 +58,55 @@ function checkLinks(document, file) {
   }
 }
 
+// 用 jsdom 模拟浏览器：index.html 里的内联脚本会调用 location.replace，
+// jsdom 不支持真正导航，会通过 jsdomError 抛出来，正好用来判断“有没有跳”。
+function simulateIndex(html, url) {
+  const virtualConsole = new VirtualConsole();
+  const navigations = [];
+  virtualConsole.on('jsdomError', error => {
+    if (/navigation/i.test(error.message)) navigations.push(error.message);
+  });
+  const dom = new JSDOM(html, { url, runScripts: 'dangerously', virtualConsole });
+  return { document: dom.window.document, navigations, close: () => dom.window.close() };
+}
+
+// 根目录入口页的两个场景：
+//   /            -> 自动跳到第一章；
+//   /en/（或任何不存在的路径，被托管平台兜底成 index.html）
+//                -> 不跳转，显示“没有这个页面”，入口链接用站点绝对地址。
+// 后者是回归测试：相对跳转会让 /en/ 变成 /en/zh/zh/… 无限叠加。
+function checkHomePage(html) {
+  const before = failures;
+  const missing = simulateIndex(html, 'https://example.test/en/');
+  if (missing.navigations.length) fail('index.html 在 /en/ 下仍会跳转（应显示 404 提示，否则会无限叠加 /zh/）');
+  const notice = missing.document.getElementById('not-found');
+  if (!notice || notice.hidden) fail('index.html 在 /en/ 下没有显示 404 提示');
+  const start = missing.document.querySelector('a[data-root]');
+  const rootHref = start ? start.getAttribute('data-root') : '';
+  if (!start) {
+    fail('index.html 缺少 data-root 入口链接');
+  } else {
+    if (start.href !== 'https://example.test' + rootHref) {
+      fail(`index.html 在 /en/ 下的入口链接不是站点绝对地址（${start.href}）`);
+    }
+    if (!fs.existsSync(path.join(SOURCE_DIR, rootHref.replace(/^\//, '')))) {
+      fail(`index.html 的入口目标不存在：${rootHref}`);
+    }
+  }
+  missing.close();
+
+  // 报告里的地址是 /en/zh/zh/…/00_Introduction.html：被兜底后仍不能跳。
+  const deep = simulateIndex(html, 'https://example.test/en/zh/zh/zh/00_Introduction.html');
+  if (deep.navigations.length) fail('index.html 在被 404 兜底的嵌套路径（/en/zh/zh/…）下仍会跳转');
+  deep.close();
+
+  const root = simulateIndex(html, 'https://example.test/');
+  if (!root.navigations.length) fail('index.html 在站点根目录没有跳转到第一章');
+  root.close();
+
+  if (failures === before) note('index.html：根目录跳第一章，/en/ 等无效路径显示提示');
+}
+
 function checkPage(file) {
   const html = fs.readFileSync(file, 'utf8');
   const rel = relativeToSource(file);
@@ -101,14 +150,19 @@ function main() {
     else note(`${rootRel}/：${sources.length} 个源文件全部有产物`);
   }
 
-  // 2. 根目录跳转页
+  // 2. 根目录入口页（同时会被托管平台当作 404 兜底页）
   const home = path.join(SOURCE_DIR, 'index.html');
   if (!fs.existsSync(home)) {
     fail('缺少根目录 index.html');
   } else {
     const html = fs.readFileSync(home, 'utf8');
-    if (!/http-equiv="refresh"/.test(html)) fail('index.html 不是跳转页');
-    else note('index.html：跳转到第一章');
+    if (/http-equiv=["']refresh["']/i.test(html)) {
+      fail('index.html 不能用 meta refresh：被兜底成 404 页时会叠加成 /en/zh/zh/… 无限跳转');
+    } else if (!/id="not-found"/.test(html) || !/data-root="\//.test(html)) {
+      fail('index.html 缺少 404 提示或第一章的站点绝对地址');
+    } else {
+      checkHomePage(html);
+    }
   }
 
   // 3. 所有章节页面
