@@ -160,11 +160,9 @@ body { padding: 0; }
   }
 }
 
-/* 桌面端：导航展开时给正文让出位置，收起时不浪费空间 */
-@media (min-width: 1025px) {
-  body.nav-expanded .page-shell { padding-left: 300px; }
-  .page-shell { transition: padding-left 0.3s ease; }
-}
+/* 导航是浮层：展开/收起都不改变页面布局，正文位置保持不动。
+   以前这里会给 .page-shell 加 padding-left: 300px，而 .page-shell 又是居中的，
+   于是展开/收起时正文一边变窄一边重新居中，看起来就是正文左右滑动。 */
 
 .nav-tree { list-style: none; padding-left: 0; margin: 0; }
 .nav-tree ul { list-style: none; padding-left: 1.1rem; margin: 0; }

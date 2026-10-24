@@ -37,8 +37,8 @@
     const isCollapsed = nav.classList.contains('collapsed');
     showBtn.style.display = isCollapsed ? 'block' : 'none';
     toggleBtn.innerHTML = isCollapsed ? '▶ 展开导航' : '◀ 收起导航';
-    // 桌面端展开时给正文让出左侧空间（见模板里的 body.nav-expanded 规则）
-    document.body.classList.toggle('nav-expanded', !isCollapsed);
+    // 导航是浮层（见模板 .nav-sidebar 的 fixed 定位），不碰页面布局，
+    // 所以这里不再给 body 挂 nav-expanded 之类的类——否则正文会跟着左右移动。
   }
 
   window.collapseNavSidebar = function() {
